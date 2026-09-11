@@ -166,4 +166,37 @@ func (s *APIServer) waRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": url})
 }
 
+// waDiagnose mostra a resposta LITERAL do gateway para as rotas que o
+// painel usa. É o que transforma "não funcionou" em "o gateway respondeu
+// isto" — sem precisar de acesso ao servidor.
+func (s *APIServer) waDiagnose(w http.ResponseWriter, r *http.Request) {
+	c, err := s.digigo(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "preencha a URL e o token do DigiGO em Configurações")
+		return
+	}
+	out := []map[string]any{}
+	for _, path := range []string{"/session/status", "/webhook", "/health"} {
+		linha := map[string]any{"rota": path, "url": c.BaseURL + path}
+		status, body, err := c.RawGet(r.Context(), path)
+		if err != nil {
+			linha["erro_de_rede"] = err.Error()
+		} else {
+			linha["http"] = status
+			linha["resposta"] = truncate(body, 800)
+		}
+		out = append(out, linha)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"base_url": c.BaseURL,
+		"token_termina_em": func() string {
+			if len(c.Token) > 6 {
+				return "…" + c.Token[len(c.Token)-6:]
+			}
+			return "(muito curto)"
+		}(),
+		"chamadas": out,
+	})
+}
+
 var _ = errors.Is // mantém o import quando o arquivo evolui

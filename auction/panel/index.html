@@ -420,6 +420,14 @@ const App = {
       finally { waBusy.value = ""; }
     }
 
+    const waDiag = ref(null);
+    async function waDiagnosticar() {
+      waBusy.value = "diag";
+      try { waDiag.value = await api("/api/whatsapp/diagnose"); }
+      catch (e) { flash(e.message, "err"); }
+      finally { waBusy.value = ""; }
+    }
+
     async function waRegistrarWebhook() {
       waBusy.value = "webhook";
       try {
@@ -491,6 +499,7 @@ const App = {
       admins, novoAdmin, criandoAdmin, loadAdmins, criarAdmin, alternarAdmin,
       webhookURLs, copiar,
       wa, waQR, waBusy, loadWA, waConectar, waDesconectar, waRegistrarWebhook,
+      waDiag, waDiagnosticar,
       money, fmtDate, STATUS_LABEL,
       reloadAll: () => Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]),
     };
@@ -694,6 +703,10 @@ const App = {
             Não consegui falar com o gateway: {{ wa.error }}
             <div style="margin-top:6px">Confira a URL e o token em Configurações.</div>
           </div>
+          <button class="secondary" style="margin-top:14px" :disabled="waBusy==='diag'"
+                  @click="waDiagnosticar">
+            {{ waBusy==='diag' ? 'Testando…' : 'Ver o que o gateway responde' }}
+          </button>
         </div>
 
         <template v-else>
@@ -722,6 +735,36 @@ const App = {
               <button v-if="wa.logged_in" class="secondary" :disabled="waBusy==='disconnect'"
                       style="border-color:var(--danger); color:var(--danger)"
                       @click="waDesconectar(true)">Sair (desparear)</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Diagnóstico</h2>
+            <div class="sub" style="margin-bottom:12px">
+              Mostra a resposta literal do gateway. Se algo não estiver funcionando,
+              é aqui que aparece o motivo.
+            </div>
+            <button class="secondary" :disabled="waBusy==='diag'" @click="waDiagnosticar">
+              {{ waBusy==='diag' ? 'Testando…' : 'Ver o que o gateway responde' }}
+            </button>
+            <div v-if="waDiag" style="margin-top:14px">
+              <div class="sub" style="font-size:12px">
+                URL base: <code>{{ waDiag.base_url }}</code> ·
+                token termina em <code>{{ waDiag.token_termina_em }}</code>
+              </div>
+              <div v-for="c in waDiag.chamadas" :key="c.rota"
+                   style="margin-top:10px; padding:10px; background:var(--panel-2); border-radius:8px">
+                <div style="font-family:ui-monospace,monospace; font-size:12px">
+                  GET {{ c.rota }}
+                  <span v-if="c.http" :class="['badge', c.http < 300 ? 'b-paid' : 'b-unsold']"
+                        style="margin-left:8px">HTTP {{ c.http }}</span>
+                </div>
+                <pre v-if="c.resposta" style="margin:8px 0 0; font-size:11px; white-space:pre-wrap;
+                     word-break:break-all; color:var(--muted)">{{ c.resposta }}</pre>
+                <div v-if="c.erro_de_rede" class="msg err" style="margin:8px 0 0; font-size:12px">
+                  Erro de rede: {{ c.erro_de_rede }}
+                </div>
+              </div>
             </div>
           </div>
 

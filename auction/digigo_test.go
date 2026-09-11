@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -198,5 +199,57 @@ func TestDigiGO_EventoDoWhatsmeowViraMensagem(t *testing.T) {
 	    "Info":{"ID":"X2","Chat":"g@g.us","Sender":"eu@s.whatsapp.net","IsFromMe":true},
 	    "Message":{"conversation":"500"}}}`)); err == nil {
 		t.Fatal("mensagem própria deveria ser ignorada")
+	}
+}
+
+// Erro com HTTP 200 e success:false não pode passar em silêncio: antes
+// virava struct zerada e a tela mostrava "desconectado" sem dizer por quê.
+func TestDigiGO_ErroComHTTP200NaoPassaEmSilencio(t *testing.T) {
+	casos := []struct{ nome, corpo string }{
+		{"success false com data", `{"code":401,"success":false,"error":"token inválido","data":{}}`},
+		{"success false sem data", `{"code":500,"success":false,"error":"sessão não existe"}`},
+		{"só error", `{"error":"usuário não encontrado"}`},
+		{"code de erro", `{"code":403,"message":"sem permissão"}`},
+	}
+	for _, tc := range casos {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(tc.corpo))
+		}))
+		_, err := NewDigiGO(srv.URL, "tok").Status(context.Background())
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s: deveria ter dado erro, passou em silêncio", tc.nome)
+		}
+	}
+}
+
+// Resposta sem envelope continua funcionando.
+func TestDigiGO_RespostaSemEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Connected":true,"LoggedIn":true}`))
+	}))
+	defer srv.Close()
+	st, err := NewDigiGO(srv.URL, "tok").Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Connected || !st.LoggedIn {
+		t.Fatalf("não leu a resposta sem envelope: %+v", st)
+	}
+}
+
+// Corpo que não é JSON vira erro legível, não pânico nem silêncio.
+func TestDigiGO_CorpoNaoJSONViraErroLegivel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>502 Bad Gateway</body></html>`))
+	}))
+	defer srv.Close()
+	_, err := NewDigiGO(srv.URL, "tok").Status(context.Background())
+	if err == nil {
+		t.Fatal("HTML no lugar de JSON deveria dar erro")
+	}
+	if !strings.Contains(err.Error(), "não entendi") {
+		t.Fatalf("mensagem pouco útil: %v", err)
 	}
 }

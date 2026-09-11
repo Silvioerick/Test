@@ -92,6 +92,7 @@ func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken str
 	m.HandleFunc("GET /api/whatsapp/status", s.waStatus)
 	m.HandleFunc("POST /api/whatsapp/connect", s.waConnect)
 	m.HandleFunc("GET /api/whatsapp/qr", s.waQR)
+	m.HandleFunc("GET /api/whatsapp/diagnose", s.waDiagnose)
 	m.HandleFunc("POST /api/whatsapp/disconnect", s.waDisconnect)
 	m.HandleFunc("POST /api/whatsapp/webhook", s.waRegisterWebhook)
 	m.HandleFunc("GET /api/settings/app", s.listAppSettings)

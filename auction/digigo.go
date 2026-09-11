@@ -79,14 +79,24 @@ func (d *DigiGO) do(ctx context.Context, method, path string, body, out any) err
 		return nil
 	}
 	var env digigoEnvelope
-	if err := json.Unmarshal(raw, &env); err == nil && len(env.Data) > 0 {
-		if env.Success != nil && !*env.Success {
-			return fmt.Errorf("digigo: %s %s recusado: %s", method, path,
+	if err := json.Unmarshal(raw, &env); err == nil {
+		// Erro pode vir com HTTP 200 e success:false — inclusive SEM data.
+		// Antes, esse caso caía no unmarshal do corpo inteiro e virava
+		// struct zerada: a tela mostrava "desconectado" em vez do motivo.
+		if (env.Success != nil && !*env.Success) || env.Error != "" ||
+			(env.Code != 0 && env.Code >= 300) {
+			return fmt.Errorf("digigo: %s %s recusado (code %d): %s", method, path, env.Code,
 				firstNonEmpty(env.Error, env.Message, truncate(string(raw), 200)))
 		}
-		return json.Unmarshal(env.Data, out)
+		if len(env.Data) > 0 {
+			return json.Unmarshal(env.Data, out)
+		}
 	}
-	return json.Unmarshal(raw, out)
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("digigo: %s %s devolveu algo que não entendi: %s",
+			path, method, truncate(string(raw), 200))
+	}
+	return nil
 }
 
 // DigiGOStatus é o estado da conexão com o WhatsApp.
@@ -185,4 +195,22 @@ func digigoPhone(jid string) string {
 		return jid[:i]
 	}
 	return jid
+}
+
+// RawGet faz uma chamada crua e devolve status, corpo e o que foi enviado.
+// Existe para diagnóstico: quando "não funciona", o que resolve é ver a
+// resposta literal do gateway, não adivinhar.
+func (d *DigiGO) RawGet(ctx context.Context, path string) (status int, body string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.BaseURL+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("token", d.Token)
+	resp, err := d.HTTP.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, string(raw), nil
 }

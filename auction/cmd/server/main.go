@@ -6,7 +6,10 @@
 //
 //	DATABASE_URL          Postgres
 //	REDIS_ADDR            Redis >= 7
-//	ADMIN_USER/_PASSWORD  primeiro operador do painel (só no 1º start)
+//	ADMIN_USER            usuário do primeiro operador (padrão "admin")
+//	ADMIN_PASSWORD        opcional: sem ela, a senha inicial é sorteada e
+//	                      mostrada uma vez no log — melhor que deixá-la
+//	                      em texto puro num arquivo
 //	ADMIN_TOKEN           opcional: token para script/automação
 //	ENCRYPTION_KEY        chave mestra AES-256 (base64, 32 bytes)
 //	HUBPAY_WEBHOOK_SECRET segredo HMAC do webhook da HubPay
@@ -31,8 +34,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -52,6 +57,23 @@ func mustEnv(key string) string {
 	}
 	log.Fatalf("variável de ambiente obrigatória não definida: %s (ou %s_FILE apontando pro secret)", key, key)
 	return ""
+}
+
+// randomPassword sorteia uma senha forte e legível para o primeiro
+// acesso. Sem ambiguidade visual (nada de 0/O, 1/l/I), porque ela vai ser
+// lida de um log e digitada à mão.
+func randomPassword() (string, error) {
+	const alfabeto = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	buf := make([]byte, 20)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	out := make([]byte, len(buf))
+	for i, b := range buf {
+		out[i] = alfabeto[int(b)%len(alfabeto)]
+	}
+	// Grupos de 5 para dar para ler e digitar sem errar.
+	return string(out[0:5]) + "-" + string(out[5:10]) + "-" + string(out[10:15]) + "-" + string(out[15:20]), nil
 }
 
 func envOr(key, fallback string) string {
@@ -76,6 +98,13 @@ func trimTrailingSpace(b []byte) []byte {
 }
 
 func main() {
+	// Saída para o esquecimento de senha. Rode no servidor:
+	//   docker compose exec -e ADMIN_PASSWORD='nova-senha' api \
+	//     /app/server -reset-admin=usuario
+	resetAdmin := flag.String("reset-admin", "",
+		"redefine a senha deste operador usando ADMIN_PASSWORD e sai")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -95,6 +124,18 @@ func main() {
 	cancelPing()
 	if err := auction.Migrate(ctx, db); err != nil {
 		log.Fatalf("aplicar migrations: %v", err)
+	}
+
+	if *resetAdmin != "" {
+		senha := envOr("ADMIN_PASSWORD", "")
+		if senha == "" {
+			log.Fatal("defina ADMIN_PASSWORD com a nova senha, ex.: docker compose exec -e ADMIN_PASSWORD='nova-senha' api /app/server -reset-admin=usuario")
+		}
+		if err := auction.NewStore(db).ResetAdminPassword(ctx, *resetAdmin, senha); err != nil {
+			log.Fatalf("redefinir senha: %v", err)
+		}
+		log.Printf("senha de %q redefinida. As sessões dele foram encerradas e a troca é obrigatória no próximo acesso.", *resetAdmin)
+		return
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: mustEnv("REDIS_ADDR")})
@@ -135,22 +176,52 @@ func main() {
 	go orch.Run(ctx)
 	go orch.RunExpiryWorker(ctx, eng, 5*time.Second)
 
-	// Primeiro operador do painel. ADMIN_USER/ADMIN_PASSWORD só valem
-	// quando ainda não existe nenhum: depois disso, operadores são criados
-	// pelo próprio painel. A senha do bootstrap passa por variável de
-	// ambiente, então o usuário nasce obrigado a trocá-la no 1º acesso.
+	// Primeiro operador do painel, criado só quando ainda não existe
+	// nenhum — depois disso as contas saem do próprio painel.
+	//
+	// A senha NÃO precisa vir do .env: sem ADMIN_PASSWORD, sorteamos uma e
+	// mostramos uma única vez no log. Senha em texto puro num arquivo fica
+	// em disco, em backup e em `docker inspect`; no log ela aparece uma
+	// vez e perde a validade assim que a pessoa troca.
+	//
+	// De qualquer forma o operador nasce com troca obrigatória: o que vale
+	// no banco é o hash PBKDF2, nunca a senha.
 	store := auction.NewStore(db)
 	if n, err := store.CountAdmins(ctx); err != nil {
 		log.Fatalf("contar operadores do painel: %v", err)
 	} else if n == 0 {
-		user, pass := envOr("ADMIN_USER", ""), envOr("ADMIN_PASSWORD", "")
-		if user == "" || pass == "" {
-			log.Println("AVISO: nenhum operador cadastrado no painel. Defina ADMIN_USER e ADMIN_PASSWORD no .env e reinicie para criar o primeiro.")
-		} else if _, err := store.CreateAdmin(ctx, user, pass, true); err != nil {
-			log.Fatalf("criar o primeiro operador do painel: %v", err)
-		} else {
-			log.Printf("operador %q criado — troque a senha no primeiro acesso", user)
+		user := envOr("ADMIN_USER", "admin")
+		pass := envOr("ADMIN_PASSWORD", "")
+		gerada := false
+		if pass == "" {
+			// Sem senha configurada, sorteamos uma e mostramos UMA VEZ no
+			// log. É melhor que pedir a senha no .env: nada em texto puro
+			// fica em disco, em backup ou em `docker inspect`.
+			if pass, err = randomPassword(); err != nil {
+				log.Fatalf("sortear senha do primeiro operador: %v", err)
+			}
+			gerada = true
 		}
+		if _, err := store.CreateAdmin(ctx, user, pass, true); err != nil {
+			log.Fatalf("criar o primeiro operador do painel: %v", err)
+		}
+		if gerada {
+			log.Printf("\n"+
+				"┌──────────────────────────────────────────────────────────┐\n"+
+				"│ PRIMEIRO ACESSO AO PAINEL                                │\n"+
+				"│ usuário: %-47s │\n"+
+				"│ senha:   %-47s │\n"+
+				"│                                                          │\n"+
+				"│ Esta senha aparece só agora e só aqui. Entre, troque, e   │\n"+
+				"│ ela deixa de valer. Não precisa guardá-la em lugar algum. │\n"+
+				"└──────────────────────────────────────────────────────────┘", user, pass)
+		} else {
+			log.Printf("operador %q criado a partir de ADMIN_PASSWORD — troque a senha no primeiro acesso e APAGUE ADMIN_PASSWORD do .env", user)
+		}
+	} else if envOr("ADMIN_PASSWORD", "") != "" {
+		// Já existe operador: a variável não faz mais nada e só serve para
+		// vazar uma senha em disco.
+		log.Println("AVISO: ADMIN_PASSWORD continua definida mas é ignorada (o painel já tem operador). Apague do .env — senha em texto puro em arquivo é exposição à toa.")
 	}
 
 	// ADMIN_TOKEN agora é opcional: serve para script e automação. As

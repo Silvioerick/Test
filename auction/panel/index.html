@@ -343,6 +343,39 @@ const App = {
 
     const SOURCE_LABEL = { painel: "salvo no painel", env: "herdado do ambiente", vazio: "não configurado" };
 
+    // ---- operadores do painel ----------------------------------------
+    const admins = ref([]);
+    const novoAdmin = reactive({ username: "", password: "" });
+    const criandoAdmin = ref(false);
+
+    async function loadAdmins() {
+      try { admins.value = await api("/api/admin/users"); }
+      catch (e) { flash("Erro ao listar operadores: " + e.message, "err"); }
+    }
+
+    async function criarAdmin() {
+      criandoAdmin.value = true;
+      try {
+        await api("/api/admin/users", { method: "POST", body: JSON.stringify(novoAdmin) });
+        flash("Operador criado. Ele troca a senha no primeiro acesso.", "ok");
+        novoAdmin.username = ""; novoAdmin.password = "";
+        await loadAdmins();
+      } catch (e) { flash(e.message, "err"); }
+      finally { criandoAdmin.value = false; }
+    }
+
+    async function alternarAdmin(u) {
+      const acao = u.disabled ? "reativar" : "desativar";
+      if (!confirm("Confirma " + acao + " o operador " + u.username + "?")) return;
+      try {
+        await api("/api/admin/users/" + u.id + "/disabled", {
+          method: "POST", body: JSON.stringify({ disabled: !u.disabled })
+        });
+        await loadAdmins();
+        flash("Operador " + (u.disabled ? "reativado" : "desativado") + ".", "ok");
+      } catch (e) { flash(e.message, "err"); }
+    }
+
     let refreshTimer = null;
     function startAutoRefresh() {
       clearInterval(refreshTimer);
@@ -354,7 +387,7 @@ const App = {
     onMounted(async () => {
       await loadMe();
       if (me.value) {
-        await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings()]);
+        await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings(), loadAdmins()]);
         startAutoRefresh();
       }
     });
@@ -368,6 +401,7 @@ const App = {
       cancelarLote, cancelando,
       paymentSettings, paymentAvailable, newPayment, savePaymentSetting, activateProvider,
       appSettings, settingsAvailable, settingDraft, savingSetting, saveSetting, SOURCE_LABEL,
+      admins, novoAdmin, criandoAdmin, loadAdmins, criarAdmin, alternarAdmin,
       money, fmtDate, STATUS_LABEL,
       reloadAll: () => Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]),
     };
@@ -446,6 +480,7 @@ const App = {
       <div :class="['tab', tab==='relatorio' && 'active']" @click="tab='relatorio'">Relatório</div>
       <div :class="['tab', tab==='pagamento' && 'active']" @click="tab='pagamento'">Pagamento</div>
       <div :class="['tab', tab==='config' && 'active']" @click="tab='config'">Configurações</div>
+      <div :class="['tab', tab==='conta' && 'active']" @click="tab='conta'">Conta</div>
     </div>
 
     <div v-if="tab==='cadastro'">
@@ -551,6 +586,84 @@ const App = {
           </tbody>
         </table>
         <div v-else class="empty">Nenhum leilão com esse filtro.</div>
+      </div>
+    </div>
+
+    <div v-if="tab==='conta'">
+      <div class="card">
+        <h2>Trocar minha senha</h2>
+        <div class="sub" style="margin-bottom:14px">
+          Trocar a senha encerra suas outras sessões (outro navegador, outro computador).
+        </div>
+        <div v-if="pwd.error" class="msg err">{{ pwd.error }}</div>
+        <div v-if="pwd.ok" class="msg ok">{{ pwd.ok }}</div>
+        <div class="grid">
+          <div><label>Senha atual</label><input v-model="pwd.current" type="password" autocomplete="current-password"></div>
+          <div><label>Nova senha</label><input v-model="pwd.next" type="password" autocomplete="new-password"></div>
+          <div><label>Confirme a nova</label><input v-model="pwd.confirm" type="password" autocomplete="new-password"></div>
+        </div>
+        <div class="sub" style="font-size:11px; margin-top:8px">
+          Mínimo 10 caracteres, misturando letras com números ou símbolos.
+        </div>
+        <button style="margin-top:14px" :disabled="pwd.busy" @click="changePassword">
+          {{ pwd.busy ? 'Salvando…' : 'Trocar senha' }}
+        </button>
+      </div>
+
+      <div class="card">
+        <h2>Operadores</h2>
+        <div class="sub" style="margin-bottom:14px">
+          Cada pessoa com a própria conta. Quem sair, você desativa — as sessões dela caem na hora.
+        </div>
+        <table>
+          <thead><tr><th>Usuário</th><th>Último acesso</th><th>Situação</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="u in admins" :key="u.id">
+              <td>
+                {{ u.username }}
+                <span v-if="me && u.username === me.username" class="sub" style="font-size:11px"> (você)</span>
+              </td>
+              <td>{{ u.last_login_at ? fmtDate(u.last_login_at) : '—' }}</td>
+              <td>
+                <span v-if="u.disabled" class="badge b-unsold">Desativado</span>
+                <span v-else-if="u.must_change" class="badge b-in_auction">Senha pendente</span>
+                <span v-else class="badge b-paid">Ativo</span>
+              </td>
+              <td style="text-align:right">
+                <button v-if="!me || u.username !== me.username" class="secondary"
+                        @click.stop="alternarAdmin(u)">
+                  {{ u.disabled ? 'Reativar' : 'Desativar' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Novo operador</h2>
+        <div class="sub" style="margin-bottom:14px">
+          Ele troca essa senha no primeiro acesso.
+        </div>
+        <div class="grid">
+          <div><label>Usuário</label><input v-model="novoAdmin.username" autocomplete="off"></div>
+          <div><label>Senha provisória</label><input v-model="novoAdmin.password" type="password" autocomplete="new-password"></div>
+        </div>
+        <button style="margin-top:14px" :disabled="criandoAdmin || !novoAdmin.username || !novoAdmin.password"
+                @click="criarAdmin">
+          {{ criandoAdmin ? 'Criando…' : 'Criar operador' }}
+        </button>
+      </div>
+
+      <div class="card">
+        <h2>Esqueceu a senha?</h2>
+        <div class="sub">
+          Não há recuperação por e-mail — o painel não manda e-mail. Quem tem acesso ao
+          servidor redefine pela linha de comando:
+          <pre style="background:var(--panel-2);padding:10px;border-radius:8px;overflow-x:auto;font-size:12px;margin-top:10px">docker compose exec -e ADMIN_PASSWORD='nova-senha-boa' \
+  api /app/server -reset-admin=usuario</pre>
+          As sessões daquele operador caem e a troca vira obrigatória no próximo acesso.
+        </div>
       </div>
     </div>
 

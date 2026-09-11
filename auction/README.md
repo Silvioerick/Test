@@ -17,7 +17,7 @@ cp .env.example .env
 
 # Gere os dois segredos obrigatórios (sem eles o processo recusa subir):
 sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
-sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$(openssl rand -base64 18)|" .env
+# ADMIN_PASSWORD não precisa: a senha inicial é sorteada e sai no log
 
 docker compose --profile app up --build
 ```
@@ -81,7 +81,7 @@ curl -fsSL https://get.docker.com | sh
 cd auction
 cp .env.example .env
 sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
-sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$(openssl rand -base64 18)|" .env
+# ADMIN_PASSWORD não precisa: a senha inicial é sorteada e sai no log
 sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" .env
 nano .env      # preencha AUCTION_DOMAIN e ACME_EMAIL
 
@@ -95,11 +95,11 @@ O Caddy emite o certificado sozinho em alguns segundos. Acompanhe com
 **4. Pegue o token de admin e abra o painel:**
 
 ```bash
-grep -E "ADMIN_USER|ADMIN_PASSWORD" .env
+docker compose logs api | head -20   # a senha do 1º acesso está aqui
 ```
 
-Painel em `https://SEU_DOMINIO/`. Entre com usuário e senha (o sistema
-pede a troca da senha no primeiro acesso) e vá em
+Painel em `https://SEU_DOMINIO/`. Entre com o usuário e a senha que
+apareceram no log — o sistema pede a troca no primeiro acesso — e vá em
 **Configurações** para preencher o DigiGO e os segredos de webhook — nada
 disso precisa de redeploy.
 
@@ -305,7 +305,8 @@ Toda variável aceita também `<NOME>_FILE` apontando para um secret.
 |---|---|---|
 | `DATABASE_URL` | sim | Postgres |
 | `REDIS_ADDR` | sim | Redis >= 7 |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | 1º start | primeiro operador do painel |
+| `ADMIN_USER` | não | usuário do 1º operador (padrão `admin`) |
+| `ADMIN_PASSWORD` | não | senha inicial; vazio = sorteada e mostrada no log |
 | `ADMIN_TOKEN` | não | token para script/automação (opcional) |
 | `ENCRYPTION_KEY` | sim | chave mestra AES-256 (base64, 32 bytes) |
 | `HUBPAY_WEBHOOK_SECRET` | não* | segredo HMAC do webhook |
@@ -375,9 +376,13 @@ chaves de pagamento e segredos de webhook.
   echo "sha384-$(openssl dgst -sha384 -binary panel/vendor/vue-3.4.21.prod.js \
     | openssl base64 -A)"   # atualize o integrity nos dois HTML
   ```
-- **O painel tem login por usuário e senha.** O primeiro operador nasce de
-  `ADMIN_USER`/`ADMIN_PASSWORD` (só no primeiro start, e já obrigado a
-  trocar a senha); os demais são criados no próprio painel. Senha guardada
+- **O painel tem login por usuário e senha.** A senha inicial não precisa
+  passar pelo `.env`: sem `ADMIN_PASSWORD`, o sistema sorteia uma e mostra
+  uma única vez no log da subida — senha em texto puro num arquivo fica em
+  disco, em backup e em `docker inspect`. Os demais operadores são criados
+  no próprio painel, e todo mundo nasce com troca de senha obrigatória.
+  Esqueceu? `docker compose exec -e ADMIN_PASSWORD='nova' api /app/server
+  -reset-admin=usuario`. Senha guardada
   como PBKDF2-HMAC-SHA256 com 600 mil iterações, sessão em cookie
   `httpOnly` — JavaScript nenhum lê, nem um XSS —, trava de força bruta
   por usuário e por origem, e trocar a senha derruba as outras sessões.

@@ -64,8 +64,9 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/auction?sslmode=disable
       REDIS_ADDR: redis:6399
       # Obrigatórios — o processo recusa subir sem eles.
-      # Primeiro operador do painel (só no 1º start). Depois disso as
-      # contas são criadas na própria tela.
+      # Primeiro operador do painel (só no 1º start). Sem ADMIN_PASSWORD a
+      # senha inicial é sorteada e sai no log — veja com:
+      #   docker compose logs api | head -20
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # Opcional: token para script/automação. Pessoas usam login.

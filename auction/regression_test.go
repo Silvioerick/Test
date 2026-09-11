@@ -1240,3 +1240,88 @@ func TestRegression_LotePagoNaoCancela(t *testing.T) {
 		t.Fatalf("esperava ErrLotPaid, veio %v", err)
 	}
 }
+
+// --- 23. Gestão de senha do painel -------------------------------------
+
+// A senha inicial não precisa passar por arquivo: o bootstrap aceita uma
+// senha sorteada, e o que fica gravado é só o hash.
+func TestRegression_ResetDeSenhaRecuperaAcesso(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	if _, err := st.CreateAdmin(ctx, "op", "senha-original-2026", false); err != nil {
+		t.Fatal(err)
+	}
+	// Uma sessão aberta e a conta travada por força bruta.
+	sess, _, err := st.CreateAdminSession(ctx, 1)
+	if err != nil {
+		// id pode não ser 1; busca o real.
+		var id int64
+		db.QueryRow(`SELECT id FROM admin_users WHERE username='op'`).Scan(&id)
+		sess, _, err = st.CreateAdminSession(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < adminMaxFailedTries; i++ {
+		st.AuthenticateAdmin(ctx, "op", "chute")
+	}
+	if _, err := st.AuthenticateAdmin(ctx, "op", "senha-original-2026"); !errors.Is(err, ErrAdminLocked) {
+		t.Fatal("pré-condição: deveria estar travado")
+	}
+
+	if err := st.ResetAdminPassword(ctx, "op", "senha-recuperada-2026"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A senha nova entra, a antiga não, e a trava foi limpa.
+	u, err := st.AuthenticateAdmin(ctx, "op", "senha-recuperada-2026")
+	if err != nil {
+		t.Fatalf("senha nova deveria entrar: %v", err)
+	}
+	if !u.MustChange {
+		t.Error("depois de um reset a troca deveria ser obrigatória")
+	}
+	if _, err := st.AuthenticateAdmin(ctx, "op", "senha-original-2026"); !errors.Is(err, ErrAdminInvalid) {
+		t.Errorf("senha antiga deveria ter parado de valer, veio %v", err)
+	}
+	// E a sessão que existia caiu.
+	if _, err := st.AdminBySession(ctx, sess); !errors.Is(err, ErrAdminSessionBad) {
+		t.Errorf("a sessão antiga deveria ter caído, veio %v", err)
+	}
+	// Reset em quem não existe é erro, não silêncio.
+	if err := st.ResetAdminPassword(ctx, "fantasma", "outra-senha-boa-2026"); err == nil {
+		t.Error("reset de operador inexistente deveria falhar")
+	}
+	// Reset com senha fraca é recusado.
+	if err := st.ResetAdminPassword(ctx, "op", "123"); !errors.Is(err, ErrWeakPassword) {
+		t.Errorf("senha fraca deveria ser recusada no reset, veio %v", err)
+	}
+}
+
+// Desativar um operador derruba as sessões dele na hora.
+func TestRegression_DesativarOperadorDerrubaSessao(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	id, err := st.CreateAdmin(ctx, "quem-saiu", "senha-boa-do-painel-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := st.CreateAdminSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdminBySession(ctx, sess); err != nil {
+		t.Fatalf("pré-condição: sessão deveria valer: %v", err)
+	}
+	if err := st.SetAdminDisabled(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdminBySession(ctx, sess); err == nil {
+		t.Fatal("a sessão de quem foi desativado continuou valendo")
+	}
+	if _, err := st.AuthenticateAdmin(ctx, "quem-saiu", "senha-boa-do-painel-1"); !errors.Is(err, ErrAdminDisabled) {
+		t.Errorf("desativado não deveria conseguir entrar, veio %v", err)
+	}
+}

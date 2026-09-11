@@ -283,6 +283,47 @@ func (s *Store) ChangeAdminPassword(ctx context.Context, adminID int64, current,
 	return tx.Commit()
 }
 
+// ResetAdminPassword redefine a senha de um operador sem pedir a atual.
+// É a saída para o esquecimento: roda pela linha de comando no servidor,
+// onde quem executa já tem acesso à máquina e ao banco. Derruba todas as
+// sessões daquele operador.
+func (s *Store) ResetAdminPassword(ctx context.Context, username, newPassword string) error {
+	username = strings.TrimSpace(strings.ToLower(username))
+	if err := CheckPasswordStrength(newPassword); err != nil {
+		return err
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var id int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE admin_users SET password_hash = $2, must_change = true, disabled_at = NULL
+		WHERE username = $1 RETURNING id`, username, hash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("auction: operador %q não existe", username)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE admin_sessions SET revoked_at = now() WHERE admin_id = $1 AND revoked_at IS NULL`,
+		id); err != nil {
+		return err
+	}
+	// Limpa a trava de força bruta: quem redefiniu precisa conseguir entrar.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM admin_login_attempts WHERE username = $1`, username); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ListAdmins lista os operadores do painel.
 func (s *Store) ListAdmins(ctx context.Context) ([]AdminUser, error) {
 	rows, err := s.db.QueryContext(ctx, `

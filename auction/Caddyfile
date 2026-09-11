@@ -8,6 +8,13 @@
 {$AUCTION_DOMAIN} {
 	encode gzip
 
+	# Em rede interna (domínio .local, IP, sem alcance da internet) o
+	# Let's Encrypt não consegue validar o domínio. Descomente a linha
+	# abaixo para o Caddy emitir um certificado da CA interna dele: o
+	# tráfego fica cifrado, mas o navegador avisa que não conhece a CA
+	# (normal — importe a raiz em /data/caddy/pki se quiser sem aviso).
+	# tls internal
+
 	# A API e o painel são servidos pelo mesmo processo.
 	reverse_proxy api:4000
 

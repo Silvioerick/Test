@@ -107,6 +107,75 @@ para o lugar errado.
 **Já usa nginx ou Traefik?** Ignore o `docker-compose.proxy.yml`, suba só
 com `--profile app` e aponte o seu proxy para `127.0.0.1:4000`.
 
+### Máquina em rede interna, sem IP público
+
+Descubra primeiro em qual caso você está:
+
+```bash
+curl -s ifconfig.me; echo          # IP que a internet enxerga
+ip -4 addr show scope global | grep -oP '(?<=inet )[\d.]+'   # IP da máquina
+```
+
+Se os dois forem **iguais**, a máquina tem IP público: siga o passo a
+passo de VPS acima normalmente.
+
+Se forem **diferentes** (ou o primeiro não responder), a máquina está
+atrás de NAT ou em rede interna — e aí tem uma consequência que não dá
+para contornar com configuração:
+
+> **Sem alcance da internet, o sistema não funciona.** Os lances chegam
+> por webhook do DigiGO e as confirmações de pagamento por webhook da
+> Asaas/HubPay. São POSTs que a internet faz *para* a sua máquina. Se eles
+> não chegam, ninguém dá lance e nenhum pagamento é confirmado — o cliente
+> paga, o sistema não fica sabendo, o prazo vence e o produto volta pro
+> estoque.
+
+Três saídas, da mais simples para a mais trabalhosa:
+
+**1. Túnel Cloudflare** (recomendada — grátis, não abre porta nenhuma):
+
+```bash
+# 1. one.dash.cloudflare.com -> Networks -> Tunnels -> criar, copiar token
+echo "CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi..." >> .env
+# 2. no painel do túnel, aponte o hostname público para  http://api:4000
+docker compose -f docker-compose.yml -f docker-compose.tunnel.yml \
+  --profile app up -d --build
+```
+
+**2. Redirecionamento de portas** no roteador/firewall: encaminhe 80 e 443
+para esta máquina e use um DNS dinâmico. Aí o `docker-compose.proxy.yml`
+funciona normalmente.
+
+**3. Mover para uma VPS com IP público.**
+
+#### Enquanto isso: rodar só na rede local
+
+Dá para subir e usar o painel internamente — só não vai receber lance nem
+confirmação de pagamento de fora.
+
+```bash
+echo "API_BIND=0.0.0.0:4000" >> .env
+docker compose --profile app up -d --build
+```
+
+Acesse `http://IP_DA_MAQUINA:4000/`. Descubra o IP com:
+
+```bash
+ip -4 addr show scope global | grep -oP '(?<=inet )[\d.]+'
+```
+
+Duas ressalvas:
+
+- **É HTTP puro.** O token de admin viaja num header e qualquer um na
+  mesma rede consegue lê-lo. Aceitável numa rede em que você confia,
+  ruim em rede compartilhada. Para cifrar mesmo internamente, descomente
+  `tls internal` no `Caddyfile` e use o `docker-compose.proxy.yml` com
+  `AUCTION_DOMAIN` apontando para um nome interno — o navegador vai
+  avisar que não conhece a CA, o que é esperado.
+- **`0.0.0.0` expõe a API a toda a rede.** Se a máquina também tiver uma
+  perna pública, isso a publica na internet sem TLS. Confira antes com o
+  `curl ifconfig.me` acima.
+
 #### O que fica fechado para a internet
 
 Postgres (5432), Redis (6399) e a própria API (4000) escutam **só em

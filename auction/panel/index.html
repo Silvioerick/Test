@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painel de Leilões — DigitalSac</title>
+<!-- SEGURANÇA: este script vem de um CDN de terceiros sem Subresource
+     Integrity. Antes de ir a produção, fixe o hash (ou baixe o arquivo
+     para panel/vendor/ e aponte para lá):
+       curl -s https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js \
+         | openssl dgst -sha384 -binary | openssl base64 -A
+     e acrescente integrity="sha384-<hash>" crossorigin="anonymous". -->
+<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;
+    --text: #e7e9ee; --muted: #9aa3b2; --accent: #4f8cff; --accent-2: #7c5cff;
+    --ok: #34c77b; --warn: #f2b84b; --danger: #f2555a;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #app { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:20px; }
+  .topbar input { background:var(--panel-2); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:8px 10px; font-size:13px; }
+  .tabs { display:flex; gap:4px; margin-bottom:20px; border-bottom:1px solid var(--border); }
+  .tab { padding:10px 16px; cursor:pointer; color:var(--muted); font-size:14px; border-bottom:2px solid transparent; }
+  .tab.active { color:var(--text); border-color:var(--accent); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .card h2 { font-size:15px; margin:0 0 14px; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  input, select { width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:9px 10px; font-size:14px; }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:10px 16px;
+    font-size:14px; font-weight:600; cursor:pointer; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.secondary { background:var(--panel-2); border:1px solid var(--border); color:var(--text); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:16px; }
+  .stat { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .stat .n { font-size:22px; font-weight:700; }
+  .stat .l { font-size:12px; color:var(--muted); margin-top:2px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:500; padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:10px; border-bottom:1px solid var(--border); }
+  tr:hover td { background:var(--panel-2); cursor:pointer; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:99px; font-size:11px; font-weight:600; }
+  .b-open { background:#4f8cff33; color:#8fb4ff; }
+  .b-awaiting_payment { background:#f2b84b33; color:#f2c96b; }
+  .b-paid { background:#34c77b33; color:#5fe0a0; }
+  .b-unsold { background:#f2555a33; color:#f78a8d; }
+  .b-available { background:#4f8cff33; color:#8fb4ff; }
+  .b-in_auction { background:#f2b84b33; color:#f2c96b; }
+  .b-sold { background:#34c77b33; color:#5fe0a0; }
+  .msg { font-size:13px; padding:10px 12px; border-radius:8px; margin-bottom:14px; }
+  .msg.err { background:#f2555a22; color:#f78a8d; }
+  .msg.ok { background:#34c77b22; color:#5fe0a0; }
+  .modal-backdrop { position:fixed; inset:0; background:#000a; display:flex; align-items:flex-start;
+    justify-content:center; padding:40px 16px; z-index:10; }
+  .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:24px;
+    max-width:640px; width:100%; max-height:80vh; overflow:auto; }
+  .modal h3 { margin-top:0; }
+  .close-x { float:right; cursor:pointer; color:var(--muted); font-size:20px; line-height:1; }
+  .row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  .row .l { color:var(--muted); }
+  .empty { color:var(--muted); font-size:13px; padding:20px 0; text-align:center; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+
+// ---- fica só aqui: aponte pro seu domínio real do painel/API -------------
+// Mesma origem: o próprio servidor serve o painel (ver cmd/server/main.go).
+// Só aponte para outro host se hospedar o painel à parte — aí configure
+// CORS_ORIGIN no servidor.
+const DEFAULT_API_BASE = "";
+
+const STATUS_LABEL = {
+  open: "Aberto", awaiting_payment: "Aguardando pagamento", paid: "Pago",
+  unsold: "Não vendido (calote/sem lance)", cancelled: "Cancelado",
+  available: "Disponível", in_auction: "Em leilão", sold: "Vendido", returned: "Devolvido",
+};
+
+function money(cents) {
+  if (cents === null || cents === undefined) return "—";
+  return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+function fmtDate(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("pt-BR");
+}
+
+const App = {
+  setup() {
+    const apiBase = ref(localStorage.getItem("auction_api_base") || DEFAULT_API_BASE);
+    // O token de admin fica em sessionStorage, não em localStorage: morre ao
+    // fechar a aba e não fica gravado no disco do navegador. O ideal ainda é
+    // trocar por um cookie httpOnly quando o painel ganhar login de verdade.
+    const token = ref(sessionStorage.getItem("auction_admin_token") || "");
+    watch(apiBase, v => localStorage.setItem("auction_api_base", v));
+    watch(token, v => sessionStorage.setItem("auction_admin_token", v));
+
+    const tab = ref("cadastro");
+    const message = reactive({ text: "", type: "ok" });
+    function flash(text, type = "ok") {
+      message.text = text; message.type = type;
+      setTimeout(() => { if (message.text === text) message.text = ""; }, 4000);
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(apiBase.value + path, {
+        ...opts,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token.value ? { Authorization: "Bearer " + token.value } : {}),
+          ...(opts.headers || {}),
+        },
+      });
+      let body = null;
+      try { body = await res.json(); } catch (_) { /* corpo vazio */ }
+      if (!res.ok) throw new Error((body && body.error) || ("HTTP " + res.status));
+      return body;
+    }
+
+    // ---------- produtos & abertura de leilão ----------
+    const products = ref([]);
+    const loadingProducts = ref(false);
+    async function loadProducts() {
+      loadingProducts.value = true;
+      try { products.value = await api("/api/products"); }
+      catch (e) { flash("Erro ao listar produtos: " + e.message, "err"); }
+      finally { loadingProducts.value = false; }
+    }
+
+    const newProduct = reactive({ name: "", sku: "" });
+    async function createProduct() {
+      if (!newProduct.name.trim()) return flash("Nome do produto é obrigatório", "err");
+      try {
+        await api("/api/products", { method: "POST", body: JSON.stringify(newProduct) });
+        flash("Produto cadastrado.");
+        newProduct.name = ""; newProduct.sku = "";
+        await loadProducts();
+      } catch (e) { flash("Erro ao cadastrar: " + e.message, "err"); }
+    }
+
+    const lotForm = reactive({
+      product_id: "", start_price: "", min_increment: "",
+      duration_seconds: 60, extend_seconds: 15, payment_minutes: 15,
+    });
+    const openableProducts = computed(() => products.value.filter(p => p.status === "available"));
+    async function createLot() {
+      if (!lotForm.product_id) return flash("Escolha um produto disponível", "err");
+      if (!lotForm.start_price || !lotForm.min_increment) return flash("Preencha valor inicial e incremento", "err");
+      if (lotForm.duration_seconds > 180) return flash("Duração máxima do leilão é 3 minutos (180s)", "err");
+      try {
+        await api("/api/lots", {
+          method: "POST",
+          body: JSON.stringify({
+            product_id: Number(lotForm.product_id),
+            start_price_cents: Math.round(Number(lotForm.start_price) * 100),
+            min_increment_cents: Math.round(Number(lotForm.min_increment) * 100),
+            duration_seconds: Number(lotForm.duration_seconds),
+            extend_seconds: Number(lotForm.extend_seconds),
+            payment_minutes: Number(lotForm.payment_minutes),
+          }),
+        });
+        flash("Leilão aberto! Os lances já podem chegar pelo WhatsApp.");
+        lotForm.product_id = ""; lotForm.start_price = ""; lotForm.min_increment = "";
+        await Promise.all([loadProducts(), loadLots()]);
+      } catch (e) { flash("Erro ao abrir leilão: " + e.message, "err"); }
+    }
+
+    // ---------- configuração de pagamento ----------
+    const paymentSettings = ref([]);
+    const paymentAvailable = ref(true);
+    const newPayment = reactive({ provider: "asaas", api_key: "", base_url: "", activate: true });
+    async function loadPaymentSettings() {
+      try {
+        paymentSettings.value = await api("/api/settings/payment");
+        paymentAvailable.value = true;
+      } catch (e) {
+        paymentAvailable.value = false; // servidor não usa DBPaymentProvider — ok, não é erro
+      }
+    }
+    async function savePaymentSetting() {
+      if (!newPayment.provider || !newPayment.api_key) return flash("Provedor e chave de API são obrigatórios", "err");
+      try {
+        await api("/api/settings/payment", { method: "POST", body: JSON.stringify(newPayment) });
+        flash("Chave salva" + (newPayment.activate ? " e provedor ativado." : "."));
+        newPayment.api_key = ""; newPayment.base_url = "";
+        await loadPaymentSettings();
+      } catch (e) { flash("Erro ao salvar chave: " + e.message, "err"); }
+    }
+    async function activateProvider(provider) {
+      try {
+        await api("/api/settings/payment/activate", { method: "POST", body: JSON.stringify({ provider }) });
+        flash("Provedor " + provider + " ativado.");
+        await loadPaymentSettings();
+      } catch (e) { flash("Erro ao ativar: " + e.message, "err"); }
+    }
+
+    // ---------- relatório ----------
+    const summary = ref(null);
+    async function loadSummary() {
+      try { summary.value = await api("/api/reports/summary"); }
+      catch (e) { flash("Erro no relatório: " + e.message, "err"); }
+    }
+
+    const lots = ref([]);
+    const statusFilter = ref("");
+    async function loadLots() {
+      const q = statusFilter.value ? ("?status=" + encodeURIComponent(statusFilter.value)) : "";
+      try { lots.value = await api("/api/lots" + q); }
+      catch (e) { flash("Erro ao listar leilões: " + e.message, "err"); }
+    }
+    watch(statusFilter, loadLots);
+
+    const lotDetail = ref(null);
+    async function openLot(id) {
+      try { lotDetail.value = await api("/api/lots/" + encodeURIComponent(id)); }
+      catch (e) { flash("Erro ao abrir leilão: " + e.message, "err"); }
+    }
+    function closeLotDetail() { lotDetail.value = null; }
+
+    let refreshTimer = null;
+    function startAutoRefresh() {
+      clearInterval(refreshTimer);
+      refreshTimer = setInterval(() => {
+        if (tab.value === "relatorio") { loadSummary(); loadLots(); }
+      }, 8000);
+    }
+
+    onMounted(async () => {
+      await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]);
+      startAutoRefresh();
+    });
+
+    return {
+      apiBase, token, tab, message,
+      products, loadingProducts, newProduct, createProduct,
+      lotForm, openableProducts, createLot,
+      summary, lots, statusFilter, lotDetail, openLot, closeLotDetail,
+      paymentSettings, paymentAvailable, newPayment, savePaymentSetting, activateProvider,
+      money, fmtDate, STATUS_LABEL,
+      reloadAll: () => Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]),
+    };
+  },
+  template: `
+  <div>
+    <h1>Painel de Leilões</h1>
+    <div class="sub">Cadastro de produto, abertura de lote e relatório. Os lances continuam entrando pelo WhatsApp.</div>
+
+    <div class="topbar">
+      <div>
+        <label>URL da API</label>
+        <input v-model="apiBase" style="width:260px" placeholder="https://leiloes.digitalsac.io">
+      </div>
+      <div>
+        <label>Token de admin</label>
+        <input v-model="token" type="password" style="width:200px" placeholder="Bearer token">
+      </div>
+      <button class="secondary" style="align-self:flex-end" @click="reloadAll">Atualizar</button>
+    </div>
+
+    <div v-if="message.text" :class="['msg', message.type]">{{ message.text }}</div>
+
+    <div class="tabs">
+      <div :class="['tab', tab==='cadastro' && 'active']" @click="tab='cadastro'">Cadastro</div>
+      <div :class="['tab', tab==='relatorio' && 'active']" @click="tab='relatorio'">Relatório</div>
+      <div :class="['tab', tab==='pagamento' && 'active']" @click="tab='pagamento'">Pagamento</div>
+    </div>
+
+    <div v-if="tab==='cadastro'">
+      <div class="card">
+        <h2>Novo produto</h2>
+        <div class="grid">
+          <div>
+            <label>Nome</label>
+            <input v-model="newProduct.name" placeholder="Miniatura Fórmula 1 1:18">
+          </div>
+          <div>
+            <label>SKU (opcional)</label>
+            <input v-model="newProduct.sku" placeholder="F1-001">
+          </div>
+        </div>
+        <div style="margin-top:14px"><button @click="createProduct">Cadastrar produto</button></div>
+      </div>
+
+      <div class="card">
+        <h2>Abrir leilão</h2>
+        <div class="grid">
+          <div style="grid-column:1/-1">
+            <label>Produto (só aparecem os disponíveis)</label>
+            <select v-model="lotForm.product_id">
+              <option value="" disabled>Selecione…</option>
+              <option v-for="p in openableProducts" :key="p.id" :value="p.id">{{ p.name }} {{ p.sku ? '('+p.sku+')' : '' }}</option>
+            </select>
+          </div>
+          <div>
+            <label>Valor inicial do lance (R$)</label>
+            <input v-model="lotForm.start_price" type="number" min="0" step="0.01" placeholder="50,00">
+          </div>
+          <div>
+            <label>Incremento mínimo (R$)</label>
+            <input v-model="lotForm.min_increment" type="number" min="0" step="0.01" placeholder="5,00">
+          </div>
+          <div>
+            <label>Duração (segundos, máx. 180)</label>
+            <input v-model="lotForm.duration_seconds" type="number" min="1" max="180">
+          </div>
+          <div>
+            <label>Prorrogação por lance de última hora (s)</label>
+            <input v-model="lotForm.extend_seconds" type="number" min="0">
+          </div>
+          <div>
+            <label>Prazo pra pagar (minutos)</label>
+            <input v-model="lotForm.payment_minutes" type="number" min="1">
+          </div>
+        </div>
+        <div style="margin-top:14px"><button @click="createLot">Abrir leilão</button></div>
+      </div>
+
+      <div class="card">
+        <h2>Produtos cadastrados</h2>
+        <table v-if="products.length">
+          <thead><tr><th>Nome</th><th>SKU</th><th>Status</th><th>Dono atual</th></tr></thead>
+          <tbody>
+            <tr v-for="p in products" :key="p.id">
+              <td>{{ p.name }}</td>
+              <td>{{ p.sku || '—' }}</td>
+              <td><span :class="['badge', 'b-'+p.status]">{{ STATUS_LABEL[p.status] || p.status }}</span></td>
+              <td>{{ p.owner_jid || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">Nenhum produto cadastrado ainda.</div>
+      </div>
+    </div>
+
+    <div v-if="tab==='relatorio'">
+      <div class="stats" v-if="summary">
+        <div class="stat"><div class="n">{{ summary.total_lots }}</div><div class="l">Leilões no total</div></div>
+        <div class="stat"><div class="n">{{ summary.open }}</div><div class="l">Abertos agora</div></div>
+        <div class="stat"><div class="n">{{ summary.awaiting_payment }}</div><div class="l">Aguardando pagamento</div></div>
+        <div class="stat"><div class="n">{{ summary.sold }}</div><div class="l">Vendidos</div></div>
+        <div class="stat"><div class="n">{{ summary.unsold_no_payment }}</div><div class="l">Não vendidos</div></div>
+        <div class="stat"><div class="n">{{ summary.total_defaults }}</div><div class="l">Calotes</div></div>
+        <div class="stat"><div class="n">{{ money(summary.revenue_cents) }}</div><div class="l">Arrecadado</div></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px">
+          <h2 style="margin:0">Leilões</h2>
+          <select v-model="statusFilter" style="width:220px">
+            <option value="">Todos os status</option>
+            <option value="open">Aberto</option>
+            <option value="awaiting_payment">Aguardando pagamento</option>
+            <option value="paid">Pago</option>
+            <option value="unsold">Não vendido</option>
+          </select>
+        </div>
+        <table v-if="lots.length">
+          <thead><tr><th>Produto</th><th>Status</th><th>Valor atual</th><th>Lances</th><th>Responsável</th><th>Aberto em</th></tr></thead>
+          <tbody>
+            <tr v-for="l in lots" :key="l.id" @click="openLot(l.id)">
+              <td>{{ l.product_name }}</td>
+              <td><span :class="['badge', 'b-'+l.status]">{{ STATUS_LABEL[l.status] || l.status }}</span></td>
+              <td>{{ money(l.current_amount_cents || l.start_price_cents) }}</td>
+              <td>{{ l.bid_count }}</td>
+              <td>{{ l.claimant_jid || '—' }}</td>
+              <td>{{ fmtDate(l.opened_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">Nenhum leilão com esse filtro.</div>
+      </div>
+    </div>
+
+    <div v-if="tab==='pagamento'">
+      <div class="card" v-if="!paymentAvailable">
+        <div class="msg err" style="margin:0">
+          Este servidor não usa configuração de pagamento pelo banco (rodando sem <code>WithPaymentSettings</code> / <code>ENCRYPTION_KEY</code>).
+        </div>
+      </div>
+      <template v-else>
+        <div class="card">
+          <h2>Cadastrar / atualizar chave</h2>
+          <div class="sub" style="margin-bottom:14px">
+            A chave fica cifrada no banco (AES-256). Ninguém, nem o painel, mostra ela de volta em texto puro depois de salva.
+          </div>
+          <div class="grid">
+            <div>
+              <label>Provedor</label>
+              <select v-model="newPayment.provider">
+                <option value="asaas">Asaas</option>
+                <option value="hubpay">HubPay</option>
+              </select>
+            </div>
+            <div>
+              <label>Chave de API</label>
+              <input v-model="newPayment.api_key" type="password" placeholder="cole a chave aqui">
+            </div>
+            <div>
+              <label>URL base (opcional — deixe em branco pra usar o padrão)</label>
+              <input v-model="newPayment.base_url" placeholder="https://api-sandbox.asaas.com">
+            </div>
+          </div>
+          <div style="margin-top:10px; display:flex; align-items:center; gap:8px">
+            <input type="checkbox" v-model="newPayment.activate" style="width:auto; margin:0">
+            <label style="margin:0">Ativar esse provedor agora (substitui o ativo atual)</label>
+          </div>
+          <div style="margin-top:14px"><button @click="savePaymentSetting">Salvar</button></div>
+        </div>
+
+        <div class="card">
+          <h2>Provedores cadastrados</h2>
+          <table v-if="paymentSettings.length">
+            <thead><tr><th>Provedor</th><th>Chave</th><th>URL base</th><th>Status</th><th>Atualizado em</th><th></th></tr></thead>
+            <tbody>
+              <tr v-for="p in paymentSettings" :key="p.provider">
+                <td>{{ p.provider }}</td>
+                <td style="font-family:monospace">{{ p.masked_key }}</td>
+                <td>{{ p.base_url || '(padrão)' }}</td>
+                <td><span :class="['badge', p.active ? 'b-paid' : 'b-unsold']">{{ p.active ? 'Ativo' : 'Inativo' }}</span></td>
+                <td>{{ fmtDate(p.updated_at) }}</td>
+                <td><button v-if="!p.active" class="secondary" @click="activateProvider(p.provider)">Ativar</button></td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty">Nenhum provedor cadastrado ainda.</div>
+        </div>
+      </template>
+    </div>
+
+    <div class="modal-backdrop" v-if="lotDetail" @click.self="closeLotDetail">
+      <div class="modal">
+        <span class="close-x" @click="closeLotDetail">&times;</span>
+        <h3>{{ lotDetail.lot.product_name }}</h3>
+        <div class="row"><span class="l">Status</span><span><span :class="['badge','b-'+lotDetail.lot.status]">{{ STATUS_LABEL[lotDetail.lot.status] || lotDetail.lot.status }}</span></span></div>
+        <div class="row"><span class="l">Valor inicial</span><span>{{ money(lotDetail.lot.start_price_cents) }}</span></div>
+        <div class="row"><span class="l">Valor atual</span><span>{{ money(lotDetail.lot.current_amount_cents) }}</span></div>
+        <div class="row"><span class="l">Responsável (vencedor)</span><span>{{ lotDetail.lot.claimant_jid || '—' }}</span></div>
+        <div class="row"><span class="l">Aberto em</span><span>{{ fmtDate(lotDetail.lot.opened_at) }}</span></div>
+        <div class="row"><span class="l">Fechado em</span><span>{{ fmtDate(lotDetail.lot.closed_at) }}</span></div>
+
+        <h3 style="margin-top:20px">Lances ({{ lotDetail.bids.length }})</h3>
+        <table v-if="lotDetail.bids.length">
+          <thead><tr><th>Quem</th><th>Valor</th><th>Quando</th></tr></thead>
+          <tbody>
+            <tr v-for="(b,i) in lotDetail.bids" :key="i"><td>{{ b.jid }}</td><td>{{ money(b.amount_cents) }}</td><td>{{ fmtDate(b.created_at) }}</td></tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">Sem lances.</div>
+
+        <h3 style="margin-top:20px">Pagamentos</h3>
+        <table v-if="lotDetail.payment_orders.length">
+          <thead><tr><th>Quem</th><th>Valor</th><th>Status</th><th>Vence em</th><th>Pago em</th></tr></thead>
+          <tbody>
+            <tr v-for="(o,i) in lotDetail.payment_orders" :key="i">
+              <td>{{ o.jid }}</td><td>{{ money(o.amount_cents) }}</td><td>{{ o.status }}</td>
+              <td>{{ fmtDate(o.expires_at) }}</td><td>{{ fmtDate(o.paid_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">Nenhum pedido de pagamento ainda.</div>
+      </div>
+    </div>
+  </div>
+  `,
+};
+
+createApp(App).mount("#app");
+</script>
+</body>
+</html>

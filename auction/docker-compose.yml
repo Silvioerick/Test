@@ -1,0 +1,49 @@
+# Ambiente de desenvolvimento e de teste.
+#
+#   docker compose up -d postgres redis
+#   go test ./...
+#
+# Os testes esperam Redis em 6399 e Postgres em 5432 com o banco
+# auction_test (o runner de migrations cria o schema sozinho).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auction_test
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--port", "6399", "--save", ""]
+    ports: ["6399:6399"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6399", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    profiles: ["app"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/auction_test?sslmode=disable
+      REDIS_ADDR: redis:6399
+      # Gere os seus: openssl rand -base64 32 / openssl rand -hex 32
+      ADMIN_TOKEN: troque-este-token
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?defina ENCRYPTION_KEY (openssl rand -base64 32)}
+      HUBPAY_WEBHOOK_SECRET: ${HUBPAY_WEBHOOK_SECRET:-}
+      ASAAS_WEBHOOK_TOKEN: ${ASAAS_WEBHOOK_TOKEN:-}
+      WHATSAPP_WEBHOOK_SECRET: ${WHATSAPP_WEBHOOK_SECRET:-}
+      WHATSAPP_API_URL: ${WHATSAPP_API_URL:-}
+      WHATSAPP_API_TOKEN: ${WHATSAPP_API_TOKEN:-}
+    ports: ["8080:8080"]

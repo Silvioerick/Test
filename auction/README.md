@@ -215,7 +215,11 @@ engano.
 
 ### Por que estas versões
 
-- **Postgres 18** é o padrão do compose. O schema não usa nada acima de
+- **Postgres 18** é o padrão do compose. O `PGDATA` é fixado
+  explicitamente (`/var/lib/postgresql/data/pgdata`) porque a imagem do
+  18 mudou o padrão dela — quem só monta um volume em
+  `/var/lib/postgresql/data`, como era comum até o 17, para de persistir
+  os dados ali. Fixando, o caminho é o mesmo nas duas versões. O schema não usa nada acima de
   PG 12 — o recurso mais novo é `ALTER TYPE ... ADD VALUE IF NOT EXISTS`
   —, então subir de major é livre. A CI roda a suíte em **16 e 18** para
   que isso continue sendo verdade e não uma suposição. Fixe outra com

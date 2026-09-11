@@ -16,6 +16,17 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: auction
+      # PGDATA explícito, dentro do volume montado abaixo.
+      #
+      # A imagem do Postgres 18 mudou o PGDATA padrão (passou a ser
+      # /var/lib/postgresql/<versão>/docker, e o VOLUME virou
+      # /var/lib/postgresql). Quem montava um volume em
+      # /var/lib/postgresql/data — como esta configuração fazia — para de
+      # persistir os dados ali e o contêiner pode nem subir.
+      #
+      # Fixar o PGDATA aqui torna o caminho o mesmo em 16 e em 18, que
+      # são as duas versões que a CI exercita.
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro

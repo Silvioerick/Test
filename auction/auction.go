@@ -339,6 +339,16 @@ func (e *Engine) PlaceBid(ctx context.Context, id, bidder string, amount int64, 
 	return r, nil
 }
 
+// Cancel tira o lote do ar: apaga o relógio no Redis e o remove do
+// conjunto observado, para não aceitar mais lance nem disparar
+// fechamento. Quem manda no cancelamento é o Postgres; isto só executa.
+func (e *Engine) Cancel(ctx context.Context, id string) error {
+	if err := e.rdb.SRem(ctx, openSet, id).Err(); err != nil {
+		return err
+	}
+	return e.rdb.Del(ctx, keyAuction(id), keyBids(id), keyOwner(id)).Err()
+}
+
 func (e *Engine) Get(ctx context.Context, id string) (Snapshot, error) {
 	h, err := e.rdb.HGetAll(ctx, keyAuction(id)).Result()
 	if err != nil {

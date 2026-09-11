@@ -64,7 +64,12 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/auction?sslmode=disable
       REDIS_ADDR: redis:6399
       # Obrigatórios — o processo recusa subir sem eles.
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?defina ADMIN_TOKEN no .env (openssl rand -hex 32)}
+      # Primeiro operador do painel (só no 1º start). Depois disso as
+      # contas são criadas na própria tela.
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Opcional: token para script/automação. Pessoas usam login.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?defina ENCRYPTION_KEY no .env (openssl rand -base64 32)}
       # Opcionais — cada webhook sem segredo responde 503 e não aceita nada.
       HUBPAY_WEBHOOK_SECRET: ${HUBPAY_WEBHOOK_SECRET:-}
@@ -81,8 +86,8 @@ services:
     ports: ['${API_BIND:-127.0.0.1:4000}:4000']
     restart: unless-stopped
     healthcheck:
-      # /api/products sem token responde 401 quando o servidor está de pé
-      # (e 503 se faltar ADMIN_TOKEN) — os dois provam que ele responde.
+      # /api/products sem sessão responde 401 quando o servidor está de
+      # pé — o que já prova que ele responde.
       test: ['CMD-SHELL', 'wget -q -O /dev/null -S http://127.0.0.1:4000/api/products 2>&1 | grep -qE "HTTP/1.1 (401|503)"']
       interval: 10s
       timeout: 5s

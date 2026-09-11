@@ -28,6 +28,7 @@ type APIServer struct {
 	waSecret   string                // fallback do segredo do webhook de entrada
 	waDefaults int                   // nº de calotes que bloqueia lances. 0 = não bloqueia
 	cors       string                // origem permitida no CORS. "" = sem CORS
+	shipping   ShippingCalculator    // só para validar CEP no cadastro do cliente
 	loginIPs   *ipLimiter            // trava a varredura de números no pedido de código
 	logf       func(string, ...any)
 	mux        *http.ServeMux
@@ -44,6 +45,9 @@ var publicPaths = map[string]bool{
 	"/api/customer/login/request": true,
 	"/api/customer/login/verify":  true,
 	"/api/webhooks/whatsapp":      true, // autenticado pelo próprio segredo
+	"/api/admin/login":            true, // é o próprio login
+	"/api/admin/logout":           true,
+	"/api/admin/me":               true, // responde 401 por conta própria
 }
 
 func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken string) *APIServer {
@@ -60,6 +64,7 @@ func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken str
 	m.HandleFunc("POST /api/lots", s.createLot)
 	m.HandleFunc("GET /api/lots", s.listLots)
 	m.HandleFunc("GET /api/lots/{id}", s.getLot)
+	m.HandleFunc("POST /api/lots/{id}/cancel", s.cancelLot)
 	m.HandleFunc("GET /api/reports/summary", s.reportSummary)
 	m.HandleFunc("GET /api/customers", s.listCustomers)
 	m.HandleFunc("GET /api/shipping-zones", s.listShippingZones)
@@ -72,9 +77,17 @@ func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken str
 	m.HandleFunc("POST /api/customer/login/verify", s.customerLoginVerify)
 	m.HandleFunc("GET /api/customer/me", s.customerMe)
 	m.HandleFunc("GET /api/customer/history", s.customerHistory)
+	m.HandleFunc("POST /api/customer/me", s.customerSaveProfile)
 	m.HandleFunc("GET /api/settings/payment", s.listPaymentSettings)
 	m.HandleFunc("POST /api/settings/payment", s.upsertPaymentSetting)
 	m.HandleFunc("POST /api/settings/payment/activate", s.activatePaymentSetting)
+	m.HandleFunc("POST /api/admin/login", s.adminLogin)
+	m.HandleFunc("POST /api/admin/logout", s.adminLogout)
+	m.HandleFunc("GET /api/admin/me", s.adminMe)
+	m.HandleFunc("POST /api/admin/password", s.adminChangePassword)
+	m.HandleFunc("GET /api/admin/users", s.adminListUsers)
+	m.HandleFunc("POST /api/admin/users", s.adminCreateUser)
+	m.HandleFunc("POST /api/admin/users/{id}/disabled", s.adminSetUserDisabled)
 	m.HandleFunc("GET /api/settings/app", s.listAppSettings)
 	m.HandleFunc("POST /api/settings/app", s.setAppSetting)
 	s.mux = m
@@ -147,6 +160,13 @@ func (s *APIServer) WithWhatsApp(secret string, blockAfterDefaults int) *APIServ
 	return s
 }
 
+// WithShipping permite validar o CEP já no cadastro do cliente, em vez de
+// a pessoa descobrir que não entregamos na região só ao ganhar um lote.
+func (s *APIServer) WithShipping(c ShippingCalculator) *APIServer {
+	s.shipping = c
+	return s
+}
+
 // WithCORS libera o painel hospedado em outra origem. Vazio = sem CORS
 // (painel servido pela própria API).
 func (s *APIServer) WithCORS(origin string) *APIServer {
@@ -182,20 +202,35 @@ func (s *APIServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// despachar. Sem normalizar, "/api/customer/../settings/payment" batia
 	// no prefixo público e só não vazava porque o ServeMux redireciona.
 	if !isPublicPath(path.Clean(r.URL.Path)) {
-		if s.admin == "" {
-			// Falha fechada: um deploy que esqueceu o ADMIN_TOKEN não pode
-			// virar um painel aberto com CPF e endereço de todo mundo.
-			writeErr(w, http.StatusServiceUnavailable, "painel sem token de admin configurado")
-			return
-		}
-		got := r.Header.Get("Authorization")
-		want := "Bearer " + s.admin
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		if !s.authorized(r) {
 			writeErr(w, http.StatusUnauthorized, "não autorizado")
 			return
 		}
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// authorized aceita a sessão do painel (cookie, o caminho das pessoas) ou
+// o ADMIN_TOKEN em Bearer (o caminho de script e automação).
+//
+// Antes existia só o token: um segredo único, igual para todo mundo,
+// colado num campo da tela. Sem conta por pessoa, sem saber quem fez o
+// quê, sem revogar acesso de quem saiu.
+func (s *APIServer) authorized(r *http.Request) bool {
+	if _, err := s.adminFromRequest(r); err == nil {
+		return true
+	}
+	return s.bearerOK(r)
+}
+
+// bearerOK confere o token de automação. Vazio = desligado.
+func (s *APIServer) bearerOK(r *http.Request) bool {
+	if s.admin == "" {
+		return false
+	}
+	got := r.Header.Get("Authorization")
+	want := "Bearer " + s.admin
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func isPublicPath(p string) bool {
@@ -1098,4 +1133,70 @@ func (s *APIServer) setAppSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// customerSaveProfile deixa o cliente cadastrar endereço e documento por
+// conta própria, antes de ganhar qualquer lote. Quem faz isso não vê a
+// etapa de "complete seu cadastro" depois de arrematar: a cobrança sai
+// direto, dentro do prazo curto do leilão.
+func (s *APIServer) customerSaveProfile(w http.ResponseWriter, r *http.Request) {
+	pid, err := s.requireCustomerSession(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "sessão inválida ou expirada, faça login de novo")
+		return
+	}
+	var form CustomerForm
+	if err := json.NewDecoder(r.Body).Decode(&form); err != nil {
+		writeErr(w, http.StatusBadRequest, "json inválido")
+		return
+	}
+	if form.Name == "" || form.Document == "" || form.CEP == "" || form.Street == "" ||
+		form.Number == "" || form.City == "" || form.State == "" {
+		writeErr(w, http.StatusBadRequest, "nome, documento e endereço completo são obrigatórios")
+		return
+	}
+	// Recusa CEP fora da área de entrega já aqui, para a pessoa descobrir
+	// agora e não na hora em que ganhar um lote com o relógio correndo.
+	if s.shipping != nil {
+		if _, err := s.shipping.Quote(r.Context(), form.CEP); err != nil {
+			if errors.Is(err, ErrNoShippingZone) {
+				writeErr(w, http.StatusBadRequest,
+					"ainda não entregamos nesse CEP. Confira o número ou fale com a gente no WhatsApp.")
+				return
+			}
+			s.fail(w, "conferir frete", err)
+			return
+		}
+	}
+	if err := s.store.SaveCustomerProfile(r.Context(), pid, form); err != nil {
+		s.fail(w, "salvar cadastro do cliente", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// cancelLot cancela um lote aberto por engano (valor errado, produto
+// errado, canal errado) e devolve o produto ao estoque.
+func (s *APIServer) cancelLot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	// Corpo é opcional: cancelar sem motivo é permitido.
+	json.NewDecoder(r.Body).Decode(&in)
+
+	err := s.orch.CancelAuction(r.Context(), s.engine, id, strings.TrimSpace(in.Reason))
+	switch {
+	case err == nil:
+		s.logf("auction api: lote %s cancelado (motivo: %q)", id, in.Reason)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case errors.Is(err, ErrLotNotFound):
+		writeErr(w, http.StatusNotFound, "lote não encontrado")
+	case errors.Is(err, ErrLotPaid):
+		writeErr(w, http.StatusConflict, "esse lote já foi pago — o caso é de estorno, não de cancelamento")
+	case errors.Is(err, ErrLotNotCancellable):
+		writeErr(w, http.StatusConflict, "esse lote já está encerrado")
+	default:
+		s.fail(w, "cancelar lote", err)
+	}
 }

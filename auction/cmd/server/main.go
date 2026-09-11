@@ -6,7 +6,8 @@
 //
 //	DATABASE_URL          Postgres
 //	REDIS_ADDR            Redis >= 7
-//	ADMIN_TOKEN           token do painel. SEM ELE O PAINEL NÃO ABRE.
+//	ADMIN_USER/_PASSWORD  primeiro operador do painel (só no 1º start)
+//	ADMIN_TOKEN           opcional: token para script/automação
 //	ENCRYPTION_KEY        chave mestra AES-256 (base64, 32 bytes)
 //	HUBPAY_WEBHOOK_SECRET segredo HMAC do webhook da HubPay
 //	ASAAS_WEBHOOK_TOKEN   authToken configurado no webhook da Asaas
@@ -134,7 +135,28 @@ func main() {
 	go orch.Run(ctx)
 	go orch.RunExpiryWorker(ctx, eng, 5*time.Second)
 
-	api := auction.NewAPIServer(db, eng, orch, mustEnv("ADMIN_TOKEN")).
+	// Primeiro operador do painel. ADMIN_USER/ADMIN_PASSWORD só valem
+	// quando ainda não existe nenhum: depois disso, operadores são criados
+	// pelo próprio painel. A senha do bootstrap passa por variável de
+	// ambiente, então o usuário nasce obrigado a trocá-la no 1º acesso.
+	store := auction.NewStore(db)
+	if n, err := store.CountAdmins(ctx); err != nil {
+		log.Fatalf("contar operadores do painel: %v", err)
+	} else if n == 0 {
+		user, pass := envOr("ADMIN_USER", ""), envOr("ADMIN_PASSWORD", "")
+		if user == "" || pass == "" {
+			log.Println("AVISO: nenhum operador cadastrado no painel. Defina ADMIN_USER e ADMIN_PASSWORD no .env e reinicie para criar o primeiro.")
+		} else if _, err := store.CreateAdmin(ctx, user, pass, true); err != nil {
+			log.Fatalf("criar o primeiro operador do painel: %v", err)
+		} else {
+			log.Printf("operador %q criado — troque a senha no primeiro acesso", user)
+		}
+	}
+
+	// ADMIN_TOKEN agora é opcional: serve para script e automação. As
+	// pessoas entram com usuário e senha.
+	api := auction.NewAPIServer(db, eng, orch, envOr("ADMIN_TOKEN", "")).
+		WithShipping(auction.NewZoneShipping(db)).
 		WithPaymentSettings(paymentSettings).
 		WithSettings(settings).
 		WithWebhookAuth(auction.WebhookAuth{

@@ -23,6 +23,8 @@ const (
 	// NoticeStaleLot: o lote fechou no Redis mas o Postgres não soube a
 	// tempo e a reconciliação teve de resolver. Sinal de fila entupida.
 	NoticeStaleLot NoticeKind = "stale_lot"
+	// NoticeCancelled: o organizador cancelou o lote.
+	NoticeCancelled NoticeKind = "cancelled"
 	// NoticePaidAfterExpiry: dinheiro entrou depois de o produto já ter
 	// voltado pro estoque. Alarme de reconciliação manual/estorno.
 	NoticePaidAfterExpiry NoticeKind = "paid_after_expiry"
@@ -344,6 +346,36 @@ func (o *Orchestrator) CreateAuction(ctx context.Context, engine *Engine, lotID 
 	return endsAt, nil
 }
 
+// CancelAuction cancela um lote aberto por engano: tira do ar no Redis,
+// marca como cancelado no Postgres, devolve o produto ao estoque e avisa
+// o grupo. Não vale depois de pago.
+func (o *Orchestrator) CancelAuction(ctx context.Context, engine *Engine, lotID, motivo string) error {
+	// Primeiro o Postgres, que é quem valida se PODE cancelar.
+	if err := o.store.CancelLot(ctx, lotID, motivo); err != nil {
+		return err
+	}
+	// Depois o Redis: some com o relógio para não aceitar mais lance nem
+	// disparar fechamento. Uma falha aqui não desfaz o cancelamento — o
+	// watcher vai encontrar o lote já cancelado no Postgres.
+	if err := engine.Cancel(ctx, lotID); err != nil {
+		o.logf("auction: lote %s cancelado no postgres mas falhou ao remover do redis: %v", lotID, err)
+	}
+	ch := o.channelFor(ctx, lotID)
+	o.channels.Delete(lotID)
+	o.lastAnnounce.Delete(lotID)
+	if ch != "" {
+		texto := "Leilão cancelado pelo organizador."
+		if motivo != "" {
+			texto += " Motivo: " + motivo
+		}
+		if err := o.notify.SendText(ctx, ch, texto); err != nil {
+			o.logf("auction: avisar cancelamento de %s: %v", lotID, err)
+		}
+	}
+	o.onNotice(ctx, Notice{Kind: NoticeCancelled, LotID: lotID, Detail: motivo})
+	return nil
+}
+
 // --- vencedor -----------------------------------------------------------
 
 // onWinner decide se já pode cobrar (cadastro completo) ou se precisa
@@ -658,6 +690,9 @@ func (o *Orchestrator) RunExpiryWorker(ctx context.Context, engine *Engine, inte
 		case <-purge.C:
 			if err := o.store.PurgeExpiredAuth(ctx, 7*24*time.Hour); err != nil {
 				o.logf("auction: limpeza de sessões/códigos: %v", err)
+			}
+			if err := o.store.PurgeAdminAuth(ctx, 7*24*time.Hour); err != nil {
+				o.logf("auction: limpeza de sessões do painel: %v", err)
 			}
 		case <-t.C:
 			if _, err := o.ExpireDuePayments(ctx); err != nil {

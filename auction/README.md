@@ -17,7 +17,7 @@ cp .env.example .env
 
 # Gere os dois segredos obrigatórios (sem eles o processo recusa subir):
 sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
-sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
+sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$(openssl rand -base64 18)|" .env
 
 docker compose --profile app up --build
 ```
@@ -81,7 +81,7 @@ curl -fsSL https://get.docker.com | sh
 cd auction
 cp .env.example .env
 sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
-sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
+sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$(openssl rand -base64 18)|" .env
 sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" .env
 nano .env      # preencha AUCTION_DOMAIN e ACME_EMAIL
 
@@ -95,10 +95,11 @@ O Caddy emite o certificado sozinho em alguns segundos. Acompanhe com
 **4. Pegue o token de admin e abra o painel:**
 
 ```bash
-grep ADMIN_TOKEN .env
+grep -E "ADMIN_USER|ADMIN_PASSWORD" .env
 ```
 
-Painel em `https://SEU_DOMINIO/`. Cole o token no campo do topo e vá em
+Painel em `https://SEU_DOMINIO/`. Entre com usuário e senha (o sistema
+pede a troca da senha no primeiro acesso) e vá em
 **Configurações** para preencher o DigiGO e os segredos de webhook — nada
 disso precisa de redeploy.
 
@@ -304,7 +305,8 @@ Toda variável aceita também `<NOME>_FILE` apontando para um secret.
 |---|---|---|
 | `DATABASE_URL` | sim | Postgres |
 | `REDIS_ADDR` | sim | Redis >= 7 |
-| `ADMIN_TOKEN` | sim | painel. **Sem ele o painel responde 503** |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | 1º start | primeiro operador do painel |
+| `ADMIN_TOKEN` | não | token para script/automação (opcional) |
 | `ENCRYPTION_KEY` | sim | chave mestra AES-256 (base64, 32 bytes) |
 | `HUBPAY_WEBHOOK_SECRET` | não* | segredo HMAC do webhook |
 | `ASAAS_WEBHOOK_TOKEN` | não* | `authToken` do webhook |
@@ -373,9 +375,14 @@ chaves de pagamento e segredos de webhook.
   echo "sha384-$(openssl dgst -sha384 -binary panel/vendor/vue-3.4.21.prod.js \
     | openssl base64 -A)"   # atualize o integrity nos dois HTML
   ```
-- **O token de admin é um segredo compartilhado**, guardado em
-  `sessionStorage` no navegador. Troque por login de verdade com cookie
-  `httpOnly` quando o painel crescer.
+- **O painel tem login por usuário e senha.** O primeiro operador nasce de
+  `ADMIN_USER`/`ADMIN_PASSWORD` (só no primeiro start, e já obrigado a
+  trocar a senha); os demais são criados no próprio painel. Senha guardada
+  como PBKDF2-HMAC-SHA256 com 600 mil iterações, sessão em cookie
+  `httpOnly` — JavaScript nenhum lê, nem um XSS —, trava de força bruta
+  por usuário e por origem, e trocar a senha derruba as outras sessões.
+  `ADMIN_TOKEN` continua existindo, mas só para script e automação: é
+  opcional, e sem ele o painel funciona normalmente pelo login.
 - **O gateway de WhatsApp precisa mesmo do `WHATSAPP_WEBHOOK_SECRET`:**
   quem consegue postar nesse endpoint dá lance no lugar de terceiros.
 

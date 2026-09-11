@@ -24,6 +24,9 @@ var (
 	// ErrProductUnavailable: tentaram leiloar um produto que não está no
 	// estoque disponível (já em leilão ou já vendido).
 	ErrProductUnavailable = errors.New("auction: produto não está disponível para leilão")
+	ErrLotNotFound        = errors.New("auction: lote não encontrado")
+	ErrLotPaid            = errors.New("auction: lote já foi pago — o caso é de estorno, não de cancelamento")
+	ErrLotNotCancellable  = errors.New("auction: lote já está encerrado")
 )
 
 type Store struct{ db *sql.DB }
@@ -111,6 +114,59 @@ func (s *Store) RecordBid(ctx context.Context, lotID, jid, name string, amount i
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE lots SET current_amount = GREATEST(current_amount, $2), bid_count = bid_count + 1
 		WHERE id = $1`, lotID, amount); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CancelLot cancela um lote e devolve o produto ao estoque. Serve para o
+// erro de digitação: abriu com o valor errado, o produto errado, o canal
+// errado. Só vale enquanto ninguém pagou — depois disso o dinheiro já
+// entrou e o caso é de estorno, não de cancelamento.
+//
+// Os lances ficam gravados: o histórico do que aconteceu não se apaga por
+// causa de um cancelamento administrativo.
+func (s *Store) CancelLot(ctx context.Context, lotID, motivo string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var status string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT status::text FROM lots WHERE id = $1 FOR UPDATE`, lotID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLotNotFound
+		}
+		return err
+	}
+	switch status {
+	case "paid":
+		return ErrLotPaid
+	case "cancelled", "unsold":
+		return ErrLotNotCancellable
+	}
+
+	// Um pedido de pagamento em aberto morre junto: ninguém deve pagar
+	// por um lote cancelado.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE payment_orders SET status = 'cancelled'
+		WHERE lot_id = $1 AND status = 'pending'`, lotID); err != nil {
+		return err
+	}
+	// Idem para um link de cadastro pendente.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE registration_tokens SET expired_at = now()
+		WHERE lot_id = $1 AND used_at IS NULL AND expired_at IS NULL`, lotID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE lots SET status = 'cancelled', closed_at = COALESCE(closed_at, now()),
+			cancel_reason = NULLIF($2, '') WHERE id = $1`, lotID, motivo); err != nil {
+		return err
+	}
+	if err := releaseProductTx(ctx, tx, lotID); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -458,24 +460,30 @@ func TestRegression_ProdutoNaoEntraEmDoisLeiloes(t *testing.T) {
 	}
 }
 
-// --- 9. Painel sem token não abre ---------------------------------------
+// --- 9. Painel nunca fica aberto -----------------------------------------
 
-func TestRegression_AdminTokenVazioFalhaFechado(t *testing.T) {
+// Originalmente o painel liberava tudo quando o ADMIN_TOKEN estava vazio.
+// Hoje o caminho normal é login com usuário e senha, e o token é só para
+// automação — então token vazio é legítimo e a resposta certa é 401. O
+// que não pode, em nenhuma configuração, é a base de clientes sair.
+func TestRegression_PainelNuncaFicaAberto(t *testing.T) {
 	db := testDB(t)
 	o := newTestOrchestrator(t, db, newMockPay(), &mockNotify{}, &noticeLog{})
-	api := NewAPIServer(db, New(setup(t), Options{}), o, "") // esqueceram o token
-	srv := httptest.NewServer(api)
-	t.Cleanup(srv.Close)
-	resp, err := http.Get(srv.URL + "/api/customers")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("base de clientes (CPF, endereço) ficou pública com ADMIN_TOKEN vazio")
-	}
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("esperava 503, got %d", resp.StatusCode)
+	for _, tc := range []struct{ nome, token string }{
+		{"sem token de automação", ""},
+		{"com token de automação, mas sem apresentá-lo", "um-token"},
+	} {
+		api := NewAPIServer(db, New(setup(t), Options{}), o, tc.token)
+		srv := httptest.NewServer(api)
+		resp, err := http.Get(srv.URL + "/api/customers")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		srv.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: esperava 401, got %d", tc.nome, resp.StatusCode)
+		}
 	}
 }
 
@@ -916,5 +924,319 @@ func TestRegression_CobrancaPendenteNaoViraErroPraoCliente(t *testing.T) {
 	db.QueryRow(`SELECT count(*) FROM payment_orders WHERE lot_id='lot-pend' AND status='pending' AND charge_id IS NULL`).Scan(&n)
 	if n != 1 {
 		t.Fatalf("pedido não ficou pendente para retry: %d", n)
+	}
+}
+
+// --- 20. Login do painel, com conta por pessoa -------------------------
+
+func TestRegression_PainelExigeLoginNaoTokenCompartilhado(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	o := newTestOrchestrator(t, db, newMockPay(), &mockNotify{}, &noticeLog{})
+	// Sem ADMIN_TOKEN: só o login de verdade abre o painel.
+	api := NewAPIServer(db, New(setup(t), Options{}), o, "")
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+
+	if _, err := st.CreateAdmin(ctx, "Operador", "senha-boa-do-painel-1", false); err != nil {
+		t.Fatal(err)
+	}
+	cli := &http.Client{Jar: newJar(t)}
+
+	// Sem sessão, nada.
+	resp, err := cli.Get(srv.URL + "/api/products")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("sem login deveria dar 401, deu %d", resp.StatusCode)
+	}
+
+	// Senha errada não entra.
+	if st := postJSON(t, cli, srv.URL+"/api/admin/login",
+		map[string]string{"username": "operador", "password": "chute"}); st != http.StatusUnauthorized {
+		t.Fatalf("senha errada deveria dar 401, deu %d", st)
+	}
+	// Usuário inexistente devolve a MESMA resposta — sem enumeração.
+	if st := postJSON(t, cli, srv.URL+"/api/admin/login",
+		map[string]string{"username": "naoexiste", "password": "chute"}); st != http.StatusUnauthorized {
+		t.Fatalf("usuário inexistente deveria dar 401, deu %d", st)
+	}
+
+	// Login certo (usuário é case-insensitive).
+	if st := postJSON(t, cli, srv.URL+"/api/admin/login",
+		map[string]string{"username": "OPERADOR", "password": "senha-boa-do-painel-1"}); st != http.StatusOK {
+		t.Fatalf("login correto deveria passar, deu %d", st)
+	}
+	resp, err = cli.Get(srv.URL + "/api/products")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("com sessão deveria passar, deu %d", resp.StatusCode)
+	}
+
+	// O cookie é httpOnly: JavaScript (e portanto um XSS) não lê.
+	var found bool
+	for _, c := range resp.Request.Cookies() {
+		if c.Name == adminCookie {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("cookie de sessão não foi enviado")
+	}
+
+	// Logout derruba a sessão.
+	if st := postJSON(t, cli, srv.URL+"/api/admin/logout", map[string]string{}); st != http.StatusOK {
+		t.Fatalf("logout deveria funcionar, deu %d", st)
+	}
+	resp, err = cli.Get(srv.URL + "/api/products")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("depois do logout deveria dar 401, deu %d", resp.StatusCode)
+	}
+}
+
+// Força bruta trava depois de algumas tentativas.
+func TestRegression_LoginDoPainelTravaForcaBruta(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	if _, err := st.CreateAdmin(ctx, "alvo", "senha-boa-do-painel-1", false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < adminMaxFailedTries; i++ {
+		if _, err := st.AuthenticateAdmin(ctx, "alvo", "chute"); !errors.Is(err, ErrAdminInvalid) {
+			t.Fatalf("tentativa %d: esperava ErrAdminInvalid, veio %v", i, err)
+		}
+	}
+	// Agora trava — inclusive para a senha CERTA, senão a trava não serve.
+	if _, err := st.AuthenticateAdmin(ctx, "alvo", "senha-boa-do-painel-1"); !errors.Is(err, ErrAdminLocked) {
+		t.Fatalf("deveria estar travado, veio %v", err)
+	}
+}
+
+// Senha guardada como derivação, nunca em claro; e senha fraca recusada.
+func TestRegression_SenhaDoPainelNaoFicaEmClaro(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	const senha = "senha-bem-comprida-2026"
+	if _, err := st.CreateAdmin(ctx, "op", senha, false); err != nil {
+		t.Fatal(err)
+	}
+	var hash string
+	if err := db.QueryRow(`SELECT password_hash FROM admin_users WHERE username='op'`).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(hash, senha) {
+		t.Fatal("a senha aparece em claro no banco")
+	}
+	if !strings.HasPrefix(hash, "pbkdf2_sha256$") {
+		t.Fatalf("formato de hash inesperado: %q", hash)
+	}
+	if !VerifyPassword(hash, senha) || VerifyPassword(hash, senha+"x") {
+		t.Fatal("verificação de senha quebrada")
+	}
+	for _, fraca := range []string{"curta", "12345678901", "senha123456", "aaaaaaaaaaaa"} {
+		if _, err := st.CreateAdmin(ctx, "outro"+fraca, fraca, false); !errors.Is(err, ErrWeakPassword) {
+			t.Errorf("senha %q deveria ser recusada, veio %v", fraca, err)
+		}
+	}
+}
+
+// Trocar a senha derruba as outras sessões da pessoa.
+func TestRegression_TrocarSenhaDerrubaOutrasSessoes(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	id, err := st.CreateAdmin(ctx, "op", "senha-boa-do-painel-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manter, _, err := st.CreateAdminSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outra, _, err := st.CreateAdminSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ChangeAdminPassword(ctx, id, "senha-boa-do-painel-1", "outra-senha-boa-2026", manter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdminBySession(ctx, manter); err != nil {
+		t.Fatalf("a sessão de quem trocou deveria continuar: %v", err)
+	}
+	if _, err := st.AdminBySession(ctx, outra); !errors.Is(err, ErrAdminSessionBad) {
+		t.Fatalf("a outra sessão deveria ter caído, veio %v", err)
+	}
+}
+
+// --- 21. Cliente pode se cadastrar ANTES de ganhar ---------------------
+
+func TestRegression_ClienteSeCadastraAntesDeGanhar(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	if _, err := db.Exec(`INSERT INTO shipping_zones (name, cep_prefix, price_cents) VALUES ('SP','01',2500)`); err != nil {
+		t.Fatal(err)
+	}
+	o := NewOrchestrator(st, newMockPay(), &mockNotify{}, NewZoneShipping(db),
+		OrchestratorOptions{PaymentWindow: time.Hour, ProviderName: "mock", Logf: t.Logf})
+	api := NewAPIServer(db, New(setup(t), Options{}), o, "admin").
+		WithShipping(NewZoneShipping(db))
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+
+	info, _ := st.GetOrCreateParticipant(ctx, "a@s.whatsapp.net", "")
+	sess, err := st.CreateSession(ctx, info.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// CEP fora da área é recusado JÁ AQUI, não na hora de arrematar.
+	if status, _ := doJSON(t, srv, "POST", "/api/customer/me", sess, map[string]string{
+		"Name": "Maria", "Document": "39053344705", "CEP": "99999-999",
+		"Street": "R X", "Number": "1", "City": "Y", "State": "RS",
+	}); status != http.StatusBadRequest {
+		t.Fatalf("CEP não atendido deveria dar 400, deu %d", status)
+	}
+
+	if status, _ := doJSON(t, srv, "POST", "/api/customer/me", sess, map[string]string{
+		"Name": "Maria Souza", "Document": "39053344705", "CEP": "01310-100",
+		"Street": "Av Paulista", "Number": "1578", "City": "São Paulo", "State": "SP",
+	}); status != http.StatusOK {
+		t.Fatalf("cadastro antecipado deveria passar, deu %d", status)
+	}
+
+	// Agora, ao ganhar, NÃO deve haver etapa de cadastro: cobra direto.
+	prod := mkProduct(t, db, "Item")
+	if err := st.CreateLot(ctx, "lot-pre", prod, Config{StartPrice: 1000, MinIncrement: 100}, time.Hour, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.onWinner(ctx, "lot-pre", "a@s.whatsapp.net", 8000); err != nil {
+		t.Fatal(err)
+	}
+	var nTokens int
+	db.QueryRow(`SELECT count(*) FROM registration_tokens WHERE lot_id='lot-pre'`).Scan(&nTokens)
+	if nTokens != 0 {
+		t.Fatal("quem já tem cadastro não deveria receber link de cadastro")
+	}
+	var total int64
+	var status string
+	db.QueryRow(`SELECT amount, status FROM payment_orders WHERE lot_id='lot-pre'`).Scan(&total, &status)
+	if total != 8000+2500 {
+		t.Fatalf("cobrança errada: %d (esperado lance 8000 + frete 2500)", total)
+	}
+	if status != "pending" {
+		t.Fatalf("pedido deveria estar pendente, está %s", status)
+	}
+}
+
+func newJar(t *testing.T) *cookiejar.Jar {
+	t.Helper()
+	j, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+func postJSON(t *testing.T, cli *http.Client, url string, body any) int {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	resp, err := cli.Post(url, "application/json", bytesReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// --- 22. Cancelar leilão aberto por engano -----------------------------
+
+func TestRegression_CancelarLeilaoDevolveProdutoEstoque(t *testing.T) {
+	db := testDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	o := newTestOrchestrator(t, db, newMockPay(), &mockNotify{}, &noticeLog{})
+	go o.Run(ctx) // sem isto o lance nunca chega ao Postgres
+	rdb := setup(t)
+	eng := New(rdb, Options{OnEvent: o.HandleEvent})
+	prod := mkProduct(t, db, "Aberto com valor errado")
+
+	if _, err := o.CreateAuction(ctx, eng, "lot-cancel", prod, Config{
+		StartPrice: 100000, MinIncrement: 1000, Duration: 60 * time.Second,
+	}, 0, "grupo@g.us"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.PlaceBid(ctx, "lot-cancel", "a@s.whatsapp.net", 120000, false, "m1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		var n int
+		db.QueryRow(`SELECT count(*) FROM bids WHERE lot_id='lot-cancel'`).Scan(&n)
+		return n == 1
+	})
+
+	if err := o.CancelAuction(ctx, eng, "lot-cancel", "valor inicial errado"); err != nil {
+		t.Fatal(err)
+	}
+
+	var lotStatus, prodStatus, motivo string
+	db.QueryRow(`SELECT status, COALESCE(cancel_reason,'') FROM lots WHERE id='lot-cancel'`).Scan(&lotStatus, &motivo)
+	db.QueryRow(`SELECT status FROM products WHERE id=$1`, prod).Scan(&prodStatus)
+	if lotStatus != "cancelled" {
+		t.Fatalf("lote deveria estar cancelled, está %s", lotStatus)
+	}
+	if motivo != "valor inicial errado" {
+		t.Fatalf("motivo não foi gravado: %q", motivo)
+	}
+	if prodStatus != "available" {
+		t.Fatalf("produto não voltou pro estoque: %s", prodStatus)
+	}
+	// O lance continua no histórico — cancelamento administrativo não
+	// apaga o que aconteceu.
+	var nBids int
+	db.QueryRow(`SELECT count(*) FROM bids WHERE lot_id='lot-cancel'`).Scan(&nBids)
+	if nBids != 1 {
+		t.Fatalf("o lance sumiu do histórico: %d", nBids)
+	}
+	// E o Redis não aceita mais lance nesse lote.
+	res, err := eng.PlaceBid(ctx, "lot-cancel", "b@s.whatsapp.net", 200000, false, "m2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != NotFound {
+		t.Fatalf("lote cancelado ainda aceita lance: %s", res.Status)
+	}
+	// O mesmo produto pode entrar num leilão novo.
+	if _, err := o.CreateAuction(ctx, eng, "lot-cancel-2", prod, Config{
+		StartPrice: 50000, MinIncrement: 1000, Duration: 60 * time.Second,
+	}, 0, "grupo@g.us"); err != nil {
+		t.Fatalf("produto liberado deveria poder ser releiloado: %v", err)
+	}
+}
+
+// Lote pago não se cancela: o caso é de estorno.
+func TestRegression_LotePagoNaoCancela(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	prod := mkProduct(t, db, "Item")
+	st.CreateLot(ctx, "lot-pago", prod, Config{StartPrice: 1000, MinIncrement: 100}, time.Hour, "")
+	if _, err := db.Exec(`UPDATE lots SET status='paid' WHERE id='lot-pago'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CancelLot(ctx, "lot-pago", "mudei de ideia"); !errors.Is(err, ErrLotPaid) {
+		t.Fatalf("esperava ErrLotPaid, veio %v", err)
 	}
 }

@@ -158,8 +158,58 @@ const App = {
       }
     });
 
+    // ---- meus dados: cadastro antecipado -----------------------------
+    // Preencher isto ANTES de ganhar evita a corrida contra o relógio:
+    // quem já tem cadastro recebe a cobrança direto ao arrematar, sem a
+    // etapa de "complete seu cadastro" dentro do prazo de pagamento.
+    const editando = ref(false);
+    const form = reactive({ name: "", document: "", email: "", cep: "", street: "",
+      number: "", complement: "", neighborhood: "", city: "", state: "" });
+    const salvando = ref(false);
+    const UFS = "AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split(" ");
+
+    function abrirCadastro() {
+      const p = profile.value || {};
+      Object.assign(form, {
+        name: p.name || "", document: p.document || "", email: p.email || "",
+        cep: p.cep || "", street: p.street || "", number: p.number || "",
+        complement: "", neighborhood: "", city: p.city || "", state: p.state || ""
+      });
+      editando.value = true;
+    }
+
+    function soDigitos(v) { return (v || "").replace(/\D/g, ""); }
+
+    async function buscarCEP() {
+      const cep = soDigitos(form.cep);
+      if (cep.length !== 8) return;
+      try {
+        const d = await (await fetch("https://viacep.com.br/ws/" + cep + "/json/")).json();
+        if (d.erro) return;
+        form.street = d.logradouro || form.street;
+        form.neighborhood = d.bairro || form.neighborhood;
+        form.city = d.localidade || form.city;
+        form.state = d.uf || form.state;
+      } catch { /* sem internet pro ViaCEP: preenche à mão */ }
+    }
+
+    async function salvarCadastro() {
+      salvando.value = true;
+      try {
+        await api("/api/customer/me", { method: "POST", body: JSON.stringify({
+          ...form, document: soDigitos(form.document), cep: soDigitos(form.cep)
+        })});
+        await loadAll();
+        editando.value = false;
+        flash("Cadastro salvo! Agora, se você ganhar, a cobrança sai na hora.", "ok");
+      } catch (e) {
+        flash(e.message, "err");
+      } finally { salvando.value = false; }
+    }
+
     return { apiBase, step, phone, code, message, profile, history, loading,
-      requestCode, verifyCode, logout, money, fmtDate, situacao };
+      requestCode, verifyCode, logout, money, fmtDate, situacao,
+      editando, form, salvando, UFS, abrirCadastro, buscarCEP, salvarCadastro };
   },
   template: `
   <div :class="{ wide: step === 'extrato' }">
@@ -190,10 +240,82 @@ const App = {
         <button @click="logout">Sair</button>
       </div>
 
-      <div class="card" v-if="profile && !profile.registered" style="margin-bottom:16px">
-        <div class="msg warn" style="background:#f2b84b22;color:#f2c96b;margin:0">
-          Cadastro incompleto. Se você ganhar um lote, vamos te mandar um link pra completar endereço e documento.
+      <!-- Meus dados: dá pra preencher ANTES de ganhar -->
+      <div class="card" style="margin-bottom:16px">
+        <div v-if="!editando">
+          <div v-if="profile && !profile.registered" class="msg warn"
+               style="background:#f2b84b22;color:#f2c96b;margin:0 0 12px">
+            Seu cadastro está incompleto. Se ganhar, você recebe um link pra preencher —
+            mas o prazo é curto. Preencha agora e a cobrança sai direto quando arrematar.
+          </div>
+          <div v-else class="msg ok" style="margin:0 0 12px">
+            Cadastro completo. Se ganhar um lote, a cobrança sai na hora.
+          </div>
+          <div v-if="profile && profile.registered" style="font-size:13px;color:var(--muted);margin-bottom:12px">
+            {{ profile.street }}, {{ profile.number }} — {{ profile.city }}/{{ profile.state }} · CEP {{ profile.cep }}
+          </div>
+          <button @click="abrirCadastro">
+            {{ profile && profile.registered ? 'Editar meus dados' : 'Preencher cadastro agora' }}
+          </button>
         </div>
+
+        <form v-else @submit.prevent="salvarCadastro">
+          <h3 style="margin:0 0 4px">Meus dados</h3>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
+            Precisamos disso pra calcular o frete e emitir a cobrança.
+          </div>
+
+          <label>Nome completo</label>
+          <input v-model="form.name" required autocomplete="name">
+
+          <label>CPF ou CNPJ</label>
+          <input v-model="form.document" required inputmode="numeric">
+
+          <label>E-mail</label>
+          <input v-model="form.email" type="email" autocomplete="email">
+
+          <label>CEP</label>
+          <input v-model="form.cep" required inputmode="numeric" @blur="buscarCEP"
+                 autocomplete="postal-code">
+
+          <label>Rua</label>
+          <input v-model="form.street" required autocomplete="address-line1">
+
+          <div style="display:flex;gap:10px">
+            <div style="flex:0 0 110px">
+              <label>Número</label>
+              <input v-model="form.number" required inputmode="numeric">
+            </div>
+            <div style="flex:1">
+              <label>Complemento</label>
+              <input v-model="form.complement" placeholder="apto, bloco…">
+            </div>
+          </div>
+
+          <label>Bairro</label>
+          <input v-model="form.neighborhood" autocomplete="address-level3">
+
+          <div style="display:flex;gap:10px">
+            <div style="flex:1">
+              <label>Cidade</label>
+              <input v-model="form.city" required autocomplete="address-level2">
+            </div>
+            <div style="flex:0 0 100px">
+              <label>UF</label>
+              <select v-model="form.state" required>
+                <option value="">—</option>
+                <option v-for="uf in UFS" :key="uf" :value="uf">{{ uf }}</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:10px;margin-top:16px">
+            <button type="submit" :disabled="salvando" style="flex:1">
+              {{ salvando ? 'Salvando…' : 'Salvar cadastro' }}
+            </button>
+            <button type="button" @click="editando = false" style="background:var(--panel-2)">Cancelar</button>
+          </div>
+        </form>
       </div>
 
       <div v-if="!history.length" class="empty">Você ainda não deu nenhum lance.</div>

@@ -23,6 +23,7 @@ func testDB(t *testing.T) *sql.DB {
 	for _, tbl := range []string{
 		"payment_orders", "registration_tokens", "lot_defaults", "bids",
 		"lots", "products", "participants", "shipping_zones", "app_settings",
+		"admin_sessions", "admin_login_attempts", "admin_users",
 	} {
 		if _, err := db.Exec("TRUNCATE " + tbl + " RESTART IDENTITY CASCADE"); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)

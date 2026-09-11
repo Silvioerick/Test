@@ -249,3 +249,24 @@ func (s *Store) GetCustomerHistory(ctx context.Context, participantID int64) ([]
 	}
 	return out, rows.Err()
 }
+
+// SaveCustomerProfile deixa o cliente preencher (ou corrigir) o próprio
+// cadastro pela área do cliente, sem precisar ganhar um lote primeiro.
+//
+// Quem já está cadastrado pula a etapa de "complete seu cadastro" quando
+// vence: o Orchestrator vê registered_at preenchido e vai direto para o
+// frete e a cobrança.
+func (s *Store) SaveCustomerProfile(ctx context.Context, participantID int64, form CustomerForm) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE participants SET
+			full_name = $2, document = $3, email = NULLIF($4, ''),
+			address_cep = $5, address_street = $6, address_number = $7,
+			address_complement = NULLIF($8, ''), address_neighborhood = $9,
+			address_city = $10, address_state = $11,
+			registered_at = COALESCE(registered_at, now())
+		WHERE id = $1`,
+		participantID, form.Name, form.Document, form.Email,
+		form.CEP, form.Street, form.Number, form.Complement, form.Neighborhood,
+		form.City, form.State)
+	return err
+}

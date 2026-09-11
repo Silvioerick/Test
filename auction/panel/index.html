@@ -86,7 +86,7 @@ const DEFAULT_API_BASE = "";
 
 const STATUS_LABEL = {
   open: "Aberto", awaiting_payment: "Aguardando pagamento", paid: "Pago",
-  unsold: "Não vendido (calote/sem lance)", cancelled: "Cancelado",
+  unsold: "Não vendido (calote/sem lance)", cancelled: "Cancelado pelo organizador",
   available: "Disponível", in_auction: "Em leilão", sold: "Vendido", returned: "Devolvido",
 };
 
@@ -101,13 +101,67 @@ function fmtDate(iso) {
 
 const App = {
   setup() {
+    // ---- sessão do painel ------------------------------------------
+    const me = ref(null);              // null = não logado
+    const checkingAuth = ref(true);
+    const login = reactive({ username: "", password: "", error: "", busy: false });
+    const pwd = reactive({ current: "", next: "", confirm: "", error: "", ok: "", busy: false });
+
+    async function loadMe() {
+      try {
+        const r = await fetch(apiBase.value + "/api/admin/me", { credentials: "include" });
+        me.value = r.ok ? await r.json() : null;
+      } catch { me.value = null; }
+      finally { checkingAuth.value = false; }
+    }
+
+    async function doLogin() {
+      login.error = ""; login.busy = true;
+      try {
+        const r = await fetch(apiBase.value + "/api/admin/login", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: login.username, password: login.password })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { login.error = d.error || "Não foi possível entrar."; return; }
+        login.password = "";
+        await loadMe();
+        await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings()]);
+      } catch (e) { login.error = "Erro de conexão: " + e.message; }
+      finally { login.busy = false; }
+    }
+
+    async function doLogout() {
+      try { await fetch(apiBase.value + "/api/admin/logout", { method: "POST", credentials: "include" }); } catch {}
+      me.value = null;
+    }
+
+    async function changePassword() {
+      pwd.error = ""; pwd.ok = "";
+      if (pwd.next !== pwd.confirm) { pwd.error = "A confirmação não bate com a nova senha."; return; }
+      pwd.busy = true;
+      try {
+        const r = await fetch(apiBase.value + "/api/admin/password", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ current: pwd.current, next: pwd.next })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { pwd.error = d.error || "Não foi possível trocar a senha."; return; }
+        pwd.current = pwd.next = pwd.confirm = "";
+        pwd.ok = "Senha trocada. As outras sessões suas foram encerradas.";
+        await loadMe();
+      } catch (e) { pwd.error = "Erro de conexão: " + e.message; }
+      finally { pwd.busy = false; }
+    }
+
     const apiBase = ref(localStorage.getItem("auction_api_base") || DEFAULT_API_BASE);
-    // O token de admin fica em sessionStorage, não em localStorage: morre ao
-    // fechar a aba e não fica gravado no disco do navegador. O ideal ainda é
-    // trocar por um cookie httpOnly quando o painel ganhar login de verdade.
-    const token = ref(sessionStorage.getItem("auction_admin_token") || "");
+    // A sessão vive num cookie httpOnly, que JavaScript nenhum consegue
+    // ler — nem um XSS. Antes o token de admin ficava no sessionStorage,
+    // acessível a qualquer script que rodasse na página.
+    const token = ref("");
     watch(apiBase, v => localStorage.setItem("auction_api_base", v));
-    watch(token, v => sessionStorage.setItem("auction_admin_token", v));
 
     const tab = ref("cadastro");
     const message = reactive({ text: "", type: "ok" });
@@ -119,12 +173,18 @@ const App = {
     async function api(path, opts = {}) {
       const res = await fetch(apiBase.value + path, {
         ...opts,
+        credentials: "include",   // manda o cookie de sessão do painel
         headers: {
           "Content-Type": "application/json",
-          ...(token.value ? { Authorization: "Bearer " + token.value } : {}),
           ...(opts.headers || {}),
         },
       });
+      if (res.status === 401) {
+        // Sessão caiu ou expirou: volta para o login em vez de exibir
+        // erros confusos em cada aba.
+        me.value = null;
+        throw new Error("sessão expirada, entre de novo");
+      }
       let body = null;
       try { body = await res.json(); } catch (_) { /* corpo vazio */ }
       if (!res.ok) throw new Error((body && body.error) || ("HTTP " + res.status));
@@ -231,6 +291,26 @@ const App = {
     }
     function closeLotDetail() { lotDetail.value = null; }
 
+    const cancelando = ref(false);
+    async function cancelarLote(id) {
+      const motivo = prompt(
+        "Cancelar este leilão e devolver o produto ao estoque.\n\n" +
+        "Os lances ficam no histórico. Quem estiver no grupo será avisado.\n\n" +
+        "Motivo (opcional):");
+      if (motivo === null) return;   // desistiu
+      cancelando.value = true;
+      try {
+        await api("/api/lots/" + encodeURIComponent(id) + "/cancel", {
+          method: "POST", body: JSON.stringify({ reason: motivo })
+        });
+        flash("Leilão cancelado. O produto voltou pro estoque.", "ok");
+        closeLotDetail();
+        await Promise.all([loadLots(), loadSummary(), loadProducts()]);
+      } catch (e) {
+        flash("Não deu pra cancelar: " + e.message, "err");
+      } finally { cancelando.value = false; }
+    }
+
     // ---- Configurações gerais (DigiGO, segredos de webhook, link) -------
     const appSettings = ref([]);
     const settingsAvailable = ref(true);
@@ -272,15 +352,20 @@ const App = {
     }
 
     onMounted(async () => {
-      await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings()]);
-      startAutoRefresh();
+      await loadMe();
+      if (me.value) {
+        await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings()]);
+        startAutoRefresh();
+      }
     });
 
     return {
-      apiBase, token, tab, message,
+      apiBase, tab, message,
+      me, checkingAuth, login, doLogin, doLogout, pwd, changePassword,
       products, loadingProducts, newProduct, createProduct,
       lotForm, openableProducts, createLot,
       summary, lots, statusFilter, lotDetail, openLot, closeLotDetail,
+      cancelarLote, cancelando,
       paymentSettings, paymentAvailable, newPayment, savePaymentSetting, activateProvider,
       appSettings, settingsAvailable, settingDraft, savingSetting, saveSetting, SOURCE_LABEL,
       money, fmtDate, STATUS_LABEL,
@@ -289,13 +374,63 @@ const App = {
   },
   template: `
   <div>
+    <div v-if="checkingAuth" class="empty" style="padding:60px">Carregando…</div>
+
+    <!-- Tela de login: nada do painel é montado antes de autenticar -->
+    <div v-else-if="!me" style="max-width:380px; margin:60px auto">
+      <h1>Painel de Leilões</h1>
+      <div class="sub">Entre com seu usuário e senha.</div>
+      <div class="card">
+        <div v-if="login.error" class="msg err">{{ login.error }}</div>
+        <form @submit.prevent="doLogin">
+          <label>Usuário</label>
+          <input v-model="login.username" autocomplete="username" autofocus>
+          <label style="margin-top:12px">Senha</label>
+          <input v-model="login.password" type="password" autocomplete="current-password">
+          <button type="submit" style="width:100%; margin-top:18px" :disabled="login.busy">
+            {{ login.busy ? 'Entrando…' : 'Entrar' }}
+          </button>
+        </form>
+      </div>
+      <div class="sub" style="font-size:12px; text-align:center">
+        Primeiro acesso? O operador inicial é criado com ADMIN_USER e ADMIN_PASSWORD no .env.
+      </div>
+    </div>
+
+    <div v-else>
     <h1>Painel de Leilões</h1>
     <div class="sub">Cadastro de produto, abertura de lote e relatório. Os lances continuam entrando pelo WhatsApp.</div>
 
+    <!-- Troca de senha obrigatória: a senha do bootstrap passou por
+         variável de ambiente, então não pode continuar valendo. -->
+    <div v-if="me.must_change" class="card" style="border-color:var(--warn)">
+      <h2>Troque sua senha para continuar</h2>
+      <div class="sub" style="margin-bottom:14px">
+        Sua senha veio do arquivo de configuração do servidor. Defina uma só sua antes de usar o painel.
+      </div>
+      <div v-if="pwd.error" class="msg err">{{ pwd.error }}</div>
+      <div class="grid">
+        <div><label>Senha atual</label><input v-model="pwd.current" type="password" autocomplete="current-password"></div>
+        <div><label>Nova senha</label><input v-model="pwd.next" type="password" autocomplete="new-password"></div>
+        <div><label>Confirme</label><input v-model="pwd.confirm" type="password" autocomplete="new-password"></div>
+      </div>
+      <button style="margin-top:14px" :disabled="pwd.busy" @click="changePassword">
+        {{ pwd.busy ? 'Salvando…' : 'Trocar senha' }}
+      </button>
+    </div>
+
     <div class="topbar">
+      <div style="margin-left:auto; display:flex; align-items:center; gap:12px">
+        <span class="sub" style="margin:0">
+          Conectado como <strong>{{ me.username }}</strong>
+        </span>
+        <button class="secondary" @click="doLogout">Sair</button>
+      </div>
+    </div>
+    <div v-if="false" class="topbar">
       <div>
         <label>URL da API</label>
-        <input v-model="apiBase" style="width:260px" placeholder="https://leiloes.digitalsac.io">
+        <input v-model="apiBase" style="width:260px">
       </div>
       <div>
         <label>Token de admin</label>
@@ -533,6 +668,19 @@ const App = {
       <div class="modal">
         <span class="close-x" @click="closeLotDetail">&times;</span>
         <h3>{{ lotDetail.lot.product_name }}</h3>
+        <!-- Cancelar: para o lote aberto por engano. Some depois de pago,
+             quando o caso passa a ser de estorno. -->
+        <div v-if="!['paid','cancelled','unsold'].includes(lotDetail.lot.status)"
+             style="margin:-6px 0 14px">
+          <button class="secondary" :disabled="cancelando"
+                  style="border-color:var(--danger); color:var(--danger)"
+                  @click="cancelarLote(lotDetail.lot.id)">
+            {{ cancelando ? 'Cancelando…' : 'Cancelar leilão' }}
+          </button>
+          <div class="sub" style="font-size:11px; margin-top:6px">
+            Devolve o produto ao estoque e avisa o grupo. Os lances ficam no histórico.
+          </div>
+        </div>
         <div class="row"><span class="l">Status</span><span><span :class="['badge','b-'+lotDetail.lot.status]">{{ STATUS_LABEL[lotDetail.lot.status] || lotDetail.lot.status }}</span></span></div>
         <div class="row"><span class="l">Valor inicial</span><span>{{ money(lotDetail.lot.start_price_cents) }}</span></div>
         <div class="row"><span class="l">Valor atual</span><span>{{ money(lotDetail.lot.current_amount_cents) }}</span></div>
@@ -563,6 +711,7 @@ const App = {
       </div>
     </div>
   </div>
+    </div>
   `,
 };
 

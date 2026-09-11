@@ -228,9 +228,14 @@ func TestSettings_NotificadorLeDoBanco(t *testing.T) {
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
 		json.NewDecoder(r.Body).Decode(&in)
-		in["_auth"] = r.Header.Get("Authorization")
+		if in == nil {
+			in = map[string]any{}
+		}
+		in["_token"] = r.Header.Get("token")
+		in["_path"] = r.URL.Path
 		got <- in
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":200,"success":true,"data":{"Id":"X"}}`))
 	}))
 	t.Cleanup(gw.Close)
 
@@ -249,11 +254,16 @@ func TestSettings_NotificadorLeDoBanco(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := <-got
-	if msg["to"] != "a@s.whatsapp.net" || msg["text"] != "oi" {
+	// Contrato real do DigiGO: POST /chat/send/text com {Phone, Body} e
+	// autenticação no header "token" — não o {to, text} + Bearer genérico.
+	if msg["_path"] != "/chat/send/text" {
+		t.Fatalf("rota errada: %v", msg["_path"])
+	}
+	if msg["Phone"] != "a" || msg["Body"] != "oi" {
 		t.Fatalf("payload errado: %v", msg)
 	}
-	if msg["_auth"] != "Bearer tok-123" {
-		t.Fatalf("token do painel não foi usado: %v", msg["_auth"])
+	if msg["_token"] != "tok-123" {
+		t.Fatalf("token do painel não foi usado no header token: %v", msg["_token"])
 	}
 }
 

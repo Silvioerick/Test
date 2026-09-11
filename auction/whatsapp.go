@@ -75,37 +75,52 @@ func (n *DBNotifier) WithLogger(logf func(string, ...any)) *DBNotifier {
 	return n
 }
 
-func (n *DBNotifier) resolve(ctx context.Context) (*HTTPNotifier, error) {
+// Client devolve o cliente do gateway com a configuração salva no painel,
+// ou erro se ainda não foi configurado.
+func (n *DBNotifier) Client(ctx context.Context) (*DigiGO, error) {
 	url := n.settings.Get(ctx, SetWhatsAppAPIURL)
 	if url == "" {
 		return nil, errNoNotifierConfigured
 	}
-	return &HTTPNotifier{
-		Endpoint:   url,
-		Token:      n.settings.Get(ctx, SetWhatsAppAPIToken),
-		ToField:    n.settings.GetDefault(ctx, SetWhatsAppToField, "to"),
-		TextField:  n.settings.GetDefault(ctx, SetWhatsAppTextField, "text"),
-		HTTPClient: n.client,
-		Logf:       n.logf,
-	}, nil
+	c := NewDigiGO(url, n.settings.Get(ctx, SetWhatsAppAPIToken))
+	c.HTTP = n.client
+	return c, nil
 }
 
 func (n *DBNotifier) SendText(ctx context.Context, jid, text string) error {
-	h, err := n.resolve(ctx)
+	c, err := n.Client(ctx)
 	if err != nil {
 		n.logf("[whatsapp nao enviado ->%s] %s", jid, text)
 		return err
 	}
-	return h.SendText(ctx, jid, text)
+	return c.SendText(ctx, jid, text)
 }
 
 func (n *DBNotifier) SendCharge(ctx context.Context, jid, caption string, charge ChargeResult) error {
-	h, err := n.resolve(ctx)
+	c, err := n.Client(ctx)
 	if err != nil {
 		n.logf("[whatsapp nao enviado ->%s] %s | pix=%s url=%s", jid, caption, charge.PixCode, charge.PayURL)
 		return err
 	}
-	return h.SendCharge(ctx, jid, caption, charge)
+	if err := c.SendText(ctx, jid, caption); err != nil {
+		return err
+	}
+	// O código PIX vai numa mensagem só dele, para dar para copiar num
+	// toque sem arrastar a legenda junto.
+	if charge.PixCode != "" {
+		if err := c.SendText(ctx, jid, charge.PixCode); err != nil {
+			return err
+		}
+	}
+	if charge.PayURL != "" {
+		if err := c.SendText(ctx, jid, "Pagar: "+charge.PayURL); err != nil {
+			return err
+		}
+	}
+	if charge.PixCode == "" && charge.PayURL == "" {
+		return fmt.Errorf("whatsapp: cobrança %s sem PIX nem link para enviar", charge.ChargeID)
+	}
+	return nil
 }
 
 func (n *HTTPNotifier) post(ctx context.Context, payload map[string]any) error {
@@ -179,6 +194,58 @@ type InboundMessage struct {
 	Text    string
 }
 
+// whatsmeowEvent é o formato que o DIGIGO (base whatsmeow) entrega:
+// {"type":"Message","event":{"Info":{...},"Message":{...}}}.
+type whatsmeowEvent struct {
+	Type  string `json:"type"`
+	Event struct {
+		Info struct {
+			ID       string `json:"ID"`
+			Chat     string `json:"Chat"`
+			Sender   string `json:"Sender"`
+			PushName string `json:"PushName"`
+			IsFromMe bool   `json:"IsFromMe"`
+			IsGroup  bool   `json:"IsGroup"`
+			// Alguns builds entregam o remetente já em SenderAlt/LID.
+			SenderAlt string `json:"SenderAlt"`
+		} `json:"Info"`
+		Message struct {
+			Conversation    string                   `json:"conversation"`
+			ExtendedText    struct{ Text string }    `json:"extendedTextMessage"`
+			ImageCaption    struct{ Caption string } `json:"imageMessage"`
+			DocumentCaption struct{ Caption string } `json:"documentMessage"`
+		} `json:"Message"`
+	} `json:"event"`
+}
+
+// parseWhatsmeow devolve ok=false quando o corpo não é desse formato.
+func parseWhatsmeow(data []byte) (InboundMessage, bool) {
+	var e whatsmeowEvent
+	if err := json.Unmarshal(data, &e); err != nil {
+		return InboundMessage{}, false
+	}
+	i := e.Event.Info
+	if i.ID == "" && i.Sender == "" {
+		return InboundMessage{}, false
+	}
+	// Mensagem que o próprio bot mandou não é lance de ninguém.
+	if i.IsFromMe {
+		return InboundMessage{}, false
+	}
+	texto := firstNonEmpty(e.Event.Message.Conversation, e.Event.Message.ExtendedText.Text,
+		e.Event.Message.ImageCaption.Caption, e.Event.Message.DocumentCaption.Caption)
+	m := InboundMessage{
+		MsgID:   i.ID,
+		From:    firstNonEmpty(i.Sender, i.SenderAlt),
+		Channel: firstNonEmpty(i.Chat, i.Sender),
+		Text:    texto,
+	}
+	if m.MsgID == "" || m.From == "" || m.Text == "" {
+		return InboundMessage{}, false
+	}
+	return m, true
+}
+
 // inboundPayload aceita as grafias usuais dos gateways de WhatsApp.
 type inboundPayload struct {
 	ID        string `json:"id"`
@@ -216,6 +283,10 @@ func firstNonEmpty(vs ...string) string {
 // vem em "participant"/"key.participant" e o canal em "key.remoteJid"; em
 // conversa privada os dois coincidem.
 func ParseInbound(data []byte) (InboundMessage, error) {
+	// Formato do DIGIGO/whatsmeow primeiro, que é o do gateway em uso.
+	if m, ok := parseWhatsmeow(data); ok {
+		return m, nil
+	}
 	var p inboundPayload
 	if err := json.Unmarshal(data, &p); err != nil {
 		return InboundMessage{}, err

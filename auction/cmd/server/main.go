@@ -228,6 +228,7 @@ func main() {
 	// pessoas entram com usuário e senha.
 	api := auction.NewAPIServer(db, eng, orch, envOr("ADMIN_TOKEN", "")).
 		WithShipping(auction.NewZoneShipping(db)).
+		WithNotifier(notifier).
 		WithPaymentSettings(paymentSettings).
 		WithSettings(settings).
 		WithWebhookAuth(auction.WebhookAuth{

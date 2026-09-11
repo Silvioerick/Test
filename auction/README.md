@@ -103,17 +103,27 @@ apareceram no log — o sistema pede a troca no primeiro acesso — e vá em
 **Configurações** para preencher o DigiGO e os segredos de webhook — nada
 disso precisa de redeploy.
 
-**5. Aponte os webhooks** nos painéis dos provedores:
+**5. Conecte o WhatsApp** na aba **WhatsApp** do painel: preencha a URL e o
+token do DigiGO em Configurações, clique em **Conectar WhatsApp**, escaneie
+o QR que aparece na tela e clique em **Apontar webhook para cá**. Pronto —
+não precisa abrir o painel do DigiGO.
+
+O sistema fala com o DigiGO (base whatsmeow) nos endpoints
+`/session/connect`, `/session/qr`, `/session/status`, `/webhook` e
+`/chat/send/text`, autenticando no header `token`.
+
+**6. Aponte os webhooks de pagamento** nos painéis dos provedores:
 
 | Provedor | URL |
 |---|---|
-| DigiGO (mensagens recebidas) | `https://SEU_DOMINIO/api/webhooks/whatsapp` |
 | Asaas | `https://SEU_DOMINIO/api/webhooks/asaas` |
 | HubPay | `https://SEU_DOMINIO/api/webhooks/hubpay` |
 
-O do DigiGO precisa mandar o header `X-Webhook-Token` com o segredo que
-você salvou em Configurações. Enquanto o segredo não estiver salvo, o
-endpoint responde **503 e não aceita nada** — é proposital.
+O webhook de entrada do WhatsApp aceita o segredo no header
+`X-Webhook-Token`, em `Authorization: Bearer` ou em `?token=` — o botão do
+painel usa a query, porque é o que o gateway aceita ao registrar. Enquanto
+o segredo não estiver salvo, o endpoint responde **503 e não aceita nada**
+— é proposital.
 
 Ajuste também `REGISTER_URL` em Configurações para
 `https://SEU_DOMINIO/cadastro/`, senão o link mandado ao vencedor aponta

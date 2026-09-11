@@ -29,6 +29,7 @@ type APIServer struct {
 	waDefaults int                   // nº de calotes que bloqueia lances. 0 = não bloqueia
 	cors       string                // origem permitida no CORS. "" = sem CORS
 	shipping   ShippingCalculator    // só para validar CEP no cadastro do cliente
+	notifier   *DBNotifier           // para o painel falar com o gateway do WhatsApp
 	loginIPs   *ipLimiter            // trava a varredura de números no pedido de código
 	logf       func(string, ...any)
 	mux        *http.ServeMux
@@ -88,6 +89,11 @@ func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken str
 	m.HandleFunc("GET /api/admin/users", s.adminListUsers)
 	m.HandleFunc("POST /api/admin/users", s.adminCreateUser)
 	m.HandleFunc("POST /api/admin/users/{id}/disabled", s.adminSetUserDisabled)
+	m.HandleFunc("GET /api/whatsapp/status", s.waStatus)
+	m.HandleFunc("POST /api/whatsapp/connect", s.waConnect)
+	m.HandleFunc("GET /api/whatsapp/qr", s.waQR)
+	m.HandleFunc("POST /api/whatsapp/disconnect", s.waDisconnect)
+	m.HandleFunc("POST /api/whatsapp/webhook", s.waRegisterWebhook)
 	m.HandleFunc("GET /api/settings/app", s.listAppSettings)
 	m.HandleFunc("POST /api/settings/app", s.setAppSetting)
 	s.mux = m
@@ -164,6 +170,13 @@ func (s *APIServer) WithWhatsApp(secret string, blockAfterDefaults int) *APIServ
 // a pessoa descobrir que não entregamos na região só ao ganhar um lote.
 func (s *APIServer) WithShipping(c ShippingCalculator) *APIServer {
 	s.shipping = c
+	return s
+}
+
+// WithNotifier dá ao painel acesso ao gateway do WhatsApp, para conectar,
+// mostrar o QR e registrar o webhook sem sair da tela.
+func (s *APIServer) WithNotifier(n *DBNotifier) *APIServer {
+	s.notifier = n
 	return s
 }
 
@@ -1035,8 +1048,11 @@ func (s *APIServer) whatsappWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "webhook sem segredo configurado")
 		return
 	}
-	got := r.Header.Get("X-Webhook-Token")
-	if subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
+	// O segredo pode vir no header (preferível) ou na query string. Nem
+	// todo gateway de WhatsApp deixa configurar header customizado —
+	// vários só aceitam colar uma URL. Na query o segredo acaba em log de
+	// proxy, então prefira o header quando o DigiGO permitir.
+	if !webhookTokenOK(r, secret) {
 		writeErr(w, http.StatusUnauthorized, "não autorizado")
 		return
 	}
@@ -1047,8 +1063,13 @@ func (s *APIServer) whatsappWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := ParseInbound(body)
 	if err != nil {
-		// Não é erro do gateway: mensagem que não interessa (status,
-		// recibo de leitura). Responde 200 para não gerar reentrega.
+		// Pode ser uma mensagem que não interessa (status de entrega,
+		// recibo de leitura) ou o formato do gateway não batendo com o
+		// que esperamos. Registra o corpo cru truncado: sem isso, ligar um
+		// gateway novo vira adivinhação, porque o gateway não mostra a
+		// resposta que devolvemos. Responde 200 para não gerar reentrega.
+		s.logf("auction api: webhook do whatsapp ignorado (%v). Corpo recebido: %s",
+			err, truncate(string(body), 600))
 		writeJSON(w, http.StatusOK, map[string]string{"ignored": err.Error()})
 		return
 	}
@@ -1070,6 +1091,30 @@ func (s *APIServer) whatsappWebhook(w http.ResponseWriter, r *http.Request) {
 		"status": string(out.Result.Status),
 		"reply":  out.Reply,
 	})
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "… (truncado)"
+}
+
+// webhookTokenOK aceita o segredo em X-Webhook-Token, em Authorization:
+// Bearer, ou em ?token= — nessa ordem de preferência. Comparação em tempo
+// constante nos três casos.
+func webhookTokenOK(r *http.Request, secret string) bool {
+	candidatos := []string{
+		r.Header.Get("X-Webhook-Token"),
+		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+		r.URL.Query().Get("token"),
+	}
+	for _, got := range candidatos {
+		if got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(secret)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // customerLogout revoga a sessão da área do cliente. A coluna

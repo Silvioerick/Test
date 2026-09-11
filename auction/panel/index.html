@@ -4,18 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Painel de Leilões — DigitalSac</title>
-<!-- SEGURANÇA: este script vem de um CDN de terceiros sem Subresource
-     Integrity. Antes de ir a produção, fixe o hash (ou baixe o arquivo
-     para panel/vendor/ e aponte para lá):
-       curl -s https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js \
-         | openssl dgst -sha384 -binary | openssl base64 -A
-     e acrescente integrity="sha384-<hash>" crossorigin="anonymous". -->
 <!-- Vue servido pelo próprio servidor, não por CDN de terceiros: o
      painel precisa abrir em rede restrita e sem depender de um host
      externo estar no ar. O integrity fecha o caso mesmo servindo local. -->
 <script src="vendor/vue-3.4.21.prod.js"
-        integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X"
-        crossorigin="anonymous"></script>
+        integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X"></script>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;

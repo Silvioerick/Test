@@ -8,3 +8,5 @@ package-lock.json
 # Generated / vendored
 supabase/migrations
 public/opus
+# Serviço Go do leilão — formatado por gofmt, não pelo Prettier
+auction

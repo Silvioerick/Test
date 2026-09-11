@@ -11,8 +11,12 @@ dono do produto.
 
 ```bash
 docker compose up -d postgres redis
-go test ./...           # exige os dois serviços acima
+go test ./...           # o schema é aplicado sozinho (TestMain -> Migrate)
 ```
+
+Os testes esperam Postgres em `127.0.0.1:5432` (banco `auction_test`) e
+Redis em `127.0.0.1:6399` — é o que o `docker-compose.yml` sobe. Não é
+preciso rodar migration à mão.
 
 Para subir a aplicação:
 

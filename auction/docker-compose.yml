@@ -1,49 +1,71 @@
-# Ambiente de desenvolvimento e de teste.
+# Ambiente de desenvolvimento, teste e execução local.
 #
-#   docker compose up -d postgres redis
-#   go test ./...
+#   cp .env.example .env    # e gere os segredos (ver comentários no arquivo)
+#   docker compose up -d postgres redis     # só as dependências, para `go test`
+#   docker compose --profile app up --build # a stack inteira
 #
-# Os testes esperam Redis em 6399 e Postgres em 5432 com o banco
-# auction_test (o runner de migrations cria o schema sozinho).
+# Postgres: o banco da aplicação é `auction`; o de teste (`auction_test`)
+# é criado ao lado pelo initdb, porque a suíte dá TRUNCATE nas tabelas.
+# Redis roda na 6399 para não colidir com uma instância local na 6379.
 services:
   postgres:
-    image: postgres:16-alpine
+    # O schema não usa nada acima de PG 12; 18 é o padrão, 16 é o piso
+    # que a CI também exercita. Troque com POSTGRES_VERSION no .env.
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: auction_test
-    ports: ["5432:5432"]
+      POSTGRES_DB: auction
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    ports: ['5432:5432']
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
       interval: 2s
       timeout: 3s
       retries: 20
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--port", "6399", "--save", ""]
-    ports: ["6399:6399"]
+    command: ['redis-server', '--port', '6399', '--save', '']
+    ports: ['6399:6399']
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6399", "ping"]
+      test: ['CMD', 'redis-cli', '-p', '6399', 'ping']
       interval: 2s
       timeout: 3s
       retries: 20
 
   api:
     build: .
-    profiles: ["app"]
+    profiles: ['app']
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/auction_test?sslmode=disable
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/auction?sslmode=disable
       REDIS_ADDR: redis:6399
-      # Gere os seus: openssl rand -base64 32 / openssl rand -hex 32
-      ADMIN_TOKEN: troque-este-token
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?defina ENCRYPTION_KEY (openssl rand -base64 32)}
+      # Obrigatórios — o processo recusa subir sem eles.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?defina ADMIN_TOKEN no .env (openssl rand -hex 32)}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?defina ENCRYPTION_KEY no .env (openssl rand -base64 32)}
+      # Opcionais — cada webhook sem segredo responde 503 e não aceita nada.
       HUBPAY_WEBHOOK_SECRET: ${HUBPAY_WEBHOOK_SECRET:-}
       ASAAS_WEBHOOK_TOKEN: ${ASAAS_WEBHOOK_TOKEN:-}
+      ASAAS_TOKEN_HEADER: ${ASAAS_TOKEN_HEADER:-}
       WHATSAPP_WEBHOOK_SECRET: ${WHATSAPP_WEBHOOK_SECRET:-}
       WHATSAPP_API_URL: ${WHATSAPP_API_URL:-}
       WHATSAPP_API_TOKEN: ${WHATSAPP_API_TOKEN:-}
-    ports: ["8080:8080"]
+      REGISTER_URL: ${REGISTER_URL:-}
+    ports: ['8080:8080']
+    restart: unless-stopped
+    healthcheck:
+      # /api/products sem token responde 401 quando o servidor está de pé
+      # (e 503 se faltar ADMIN_TOKEN) — os dois provam que ele responde.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null -S http://127.0.0.1:8080/api/products 2>&1 | grep -qE "HTTP/1.1 (401|503)"']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  pgdata:

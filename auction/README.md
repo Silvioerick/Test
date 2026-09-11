@@ -7,16 +7,92 @@ então réplicas com relógios diferentes nunca discordam de quem venceu). O
 Postgres guarda o registro durável: quem deu lance, cadastro, cobranças e
 dono do produto.
 
-## Como roda
+## Instalação
+
+Tudo em Docker, sim. Você precisa só de `docker` e `docker compose`.
+
+```bash
+cd auction
+cp .env.example .env
+
+# Gere os dois segredos obrigatórios (sem eles o processo recusa subir):
+sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
+sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
+
+docker compose --profile app up --build
+```
+
+Pronto: painel em <http://localhost:8080/>, API em `/api/`. O servidor
+aplica as migrations sozinho na subida. Cole o `ADMIN_TOKEN` do `.env` no
+campo "Token de admin" do painel e cadastre a chave do gateway em
+Configurações — ela vai cifrada para o Postgres, não para o `.env`.
+
+Os dados ficam no volume `pgdata`; `docker compose down` preserva,
+`docker compose down -v` apaga tudo.
+
+Para desenvolver (dependências no Docker, Go na máquina):
 
 ```bash
 docker compose up -d postgres redis
-go test ./...           # o schema é aplicado sozinho (TestMain -> Migrate)
+go test ./...     # o schema é aplicado sozinho (TestMain -> Migrate)
 ```
 
-Os testes esperam Postgres em `127.0.0.1:5432` (banco `auction_test`) e
-Redis em `127.0.0.1:6399` — é o que o `docker-compose.yml` sobe. Não é
-preciso rodar migration à mão.
+O compose cria dois bancos: `auction` (aplicação) e `auction_test`
+(suíte, que dá `TRUNCATE` nas tabelas e por isso não pode encostar no
+primeiro). Redis fica na 6399 para não colidir com uma instância local.
+
+### Por que estas versões
+
+- **Postgres 18** é o padrão do compose. O schema não usa nada acima de
+  PG 12 — o recurso mais novo é `ALTER TYPE ... ADD VALUE IF NOT EXISTS`
+  —, então subir de major é livre. A CI roda a suíte em **16 e 18** para
+  que isso continue sendo verdade e não uma suposição. Fixe outra com
+  `POSTGRES_VERSION` no `.env`.
+- **Redis 7 é requisito duro, não preferência.** Todo o desempate de
+  lance sai de `redis.call('TIME')` **dentro do script Lua** — é isso que
+  faz réplicas com relógios diferentes nunca discordarem de quem venceu.
+  Redis só permite comandos não-determinísticos em script a partir do
+  7.0; em 6.x o motor não funciona.
+
+### Trocar Redis por Dragonfly
+
+É plausível: o motor usa uma superfície pequena e comum — `EXISTS`,
+`EXPIRE`, `GET`, `SET`, `HSET`, `HMGET`, `TTL`, `XADD` no Lua, e
+`HGETALL`, `SADD`, `SREM`, `SMEMBERS`, `DEL`, `TIME` no cliente.
+
+Mas **a peça que decide tudo é `TIME` dentro do Lua**, e isso precisa ser
+verificado antes de trocar, não depois. Teste assim:
+
+```bash
+docker run --rm -p 6399:6379 -d --name df   docker.dragonflydb.io/dragonflydb/dragonfly
+redis-cli -p 6399 EVAL "return redis.call('TIME')[1]" 0   # tem que devolver o epoch
+go test ./...                                              # a suíte inteira
+```
+
+Se os dois passarem, é drop-in: só trocar a imagem no compose. Se o
+`EVAL` falhar, **não troque** — o leilão perde a garantia de quem venceu.
+
+Dito isso: num leilão de WhatsApp o pico é de dezenas de lances por
+segundo, e o Redis single-thread resolve isso com folga enorme. O ganho
+multi-core do Dragonfly só aparece em ordens de grandeza acima disso.
+
+### Vault
+
+Vault **não substitui o Redis** — ele é cofre de segredos, não banco de
+dados; não tem Lua atômico nem relógio para arbitrar lance.
+
+Onde ele encaixa bem é na `ENCRYPTION_KEY`, e o código já está pronto
+para isso: toda variável aceita `<NOME>_FILE` apontando para um arquivo.
+Monte o segredo do Vault (via Agent Injector ou CSI) e aponte:
+
+```yaml
+environment:
+  ENCRYPTION_KEY_FILE: /vault/secrets/encryption-key
+  ADMIN_TOKEN_FILE: /vault/secrets/admin-token
+```
+
+O mesmo vale para secret do Docker Swarm ou Kubernetes. Assim nenhum
+segredo fica em variável de ambiente nem no `.env`.
 
 Para subir a aplicação:
 

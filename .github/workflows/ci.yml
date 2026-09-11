@@ -53,14 +53,20 @@ jobs:
         run: npm run build
 
   auction:
-    name: Leilão (Go) — vet, gofmt, test -race
+    # O schema não usa nada acima de PG 12, então a matriz fixa o piso (16)
+    # e o alvo (18) em vez de confiar numa versão só.
+    name: Leilão (Go) — PG ${{ matrix.postgres }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '18']
     defaults:
       run:
         working-directory: auction
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:${{ matrix.postgres }}-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

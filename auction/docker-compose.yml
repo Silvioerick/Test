@@ -24,6 +24,7 @@ services:
     # Para acessar de fora, use um túnel SSH:
     #   ssh -L 5432:127.0.0.1:5432 usuario@sua-vps
     ports: ['127.0.0.1:5432:5432']
+    restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres']
       interval: 2s
@@ -35,6 +36,7 @@ services:
     command: ['redis-server', '--port', '6399', '--save', '']
     # Mesma regra do Postgres: nunca em 0.0.0.0 numa VPS.
     ports: ['127.0.0.1:6399:6399']
+    restart: unless-stopped
     healthcheck:
       test: ['CMD', 'redis-cli', '-p', '6399', 'ping']
       interval: 2s

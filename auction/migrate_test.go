@@ -41,16 +41,23 @@ func TestMigrate_DoZero(t *testing.T) {
 		t.Fatalf("segunda execução (deveria ser no-op): %v", err)
 	}
 
+	// Conta do próprio embed em vez de um número fixo, para não precisar
+	// editar este teste a cada migration nova.
+	files, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var applied int
 	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 5 {
-		t.Fatalf("esperava 5 migrations registradas, tem %d", applied)
+	if applied != len(files) {
+		t.Fatalf("esperava %d migrations registradas, tem %d", len(files), applied)
 	}
 	for _, tbl := range []string{
 		"participants", "products", "lots", "bids", "lot_defaults", "payment_orders",
-		"registration_tokens", "shipping_zones", "login_codes", "sessions", "payment_settings",
+		"registration_tokens", "shipping_zones", "login_codes", "sessions",
+		"payment_settings", "app_settings",
 	} {
 		if _, err := db.Exec("SELECT 1 FROM " + tbl + " LIMIT 1"); err != nil {
 			t.Errorf("tabela %s ausente: %v", tbl, err)

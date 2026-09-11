@@ -70,7 +70,8 @@ type Orchestrator struct {
 	paymentWindow  time.Duration
 	registerWindow time.Duration
 	providerName   string
-	registerURL    string // ex.: "https://leiloes.digitalsac.io/cadastro/"
+	registerURL    string         // fallback; o painel tem precedência
+	settings       *SettingsStore // configuração editável no painel (pode ser nil)
 	maxChargeTries int
 	bidAnnounceGap time.Duration
 	lastAnnounce   sync.Map // lotID -> time.Time do último aviso no grupo
@@ -85,7 +86,10 @@ type OrchestratorOptions struct {
 	RegistrationWindow time.Duration // prazo pra preencher endereço depois de ganhar. Padrão: igual ao PaymentWindow
 	ProviderName       string        // rótulo gravado em payment_orders.provider, ex. "hubpay" ou "asaas"
 	RegisterURL        string        // prefixo do link de cadastro; o token é concatenado no final
-	QueueSize          int           // padrão 256
+	// Settings, quando presente, deixa o prefixo do link de cadastro ser
+	// editado no painel em vez de ficar preso em variável de ambiente.
+	Settings  *SettingsStore
+	QueueSize int // padrão 256
 	// MaxChargeAttempts: quantas vezes tentar gerar a cobrança antes de
 	// desistir e liberar o produto. Padrão 5.
 	MaxChargeAttempts int
@@ -134,7 +138,7 @@ func NewOrchestrator(store *Store, pay PaymentProvider, notify Notifier, shippin
 		store: store, pay: pay, notify: notify, shipping: shipping,
 		discountRule:  DefaultShippingDiscountRule(),
 		paymentWindow: o.PaymentWindow, registerWindow: o.RegistrationWindow,
-		providerName: o.ProviderName, registerURL: o.RegisterURL,
+		providerName: o.ProviderName, registerURL: o.RegisterURL, settings: o.Settings,
 		maxChargeTries: o.MaxChargeAttempts, bidAnnounceGap: o.BidAnnounceInterval,
 		queue: make(chan Event, o.QueueSize), onNotice: o.OnNotice, logf: o.Logf,
 	}
@@ -365,7 +369,7 @@ func (o *Orchestrator) sendRegistrationLink(ctx context.Context, lotID string, p
 	}
 	minutes := int(o.registerWindow.Minutes())
 	text := fmt.Sprintf("Parabéns, você venceu o lote! Complete seu cadastro (endereço e documento) em até %d min pra gente calcular o frete e gerar o pagamento: %s%s",
-		minutes, o.registerURL, token)
+		minutes, o.registerPrefix(ctx), token)
 	if err := o.notify.SendText(ctx, jid, text); err != nil {
 		return fmt.Errorf("enviar link de cadastro: %w", err)
 	}
@@ -420,6 +424,17 @@ func (o *Orchestrator) issueCharge(ctx context.Context, orderID int64, lotID, ji
 	}
 	o.onNotice(ctx, Notice{Kind: NoticeAssigned, LotID: lotID, JID: jid, Amount: total})
 	return nil
+}
+
+// registerPrefix resolve o prefixo do link de cadastro: painel primeiro,
+// depois o que veio na construção (env).
+func (o *Orchestrator) registerPrefix(ctx context.Context) string {
+	if o.settings != nil {
+		if v := o.settings.Get(ctx, SetRegisterURL); v != "" {
+			return v
+		}
+	}
+	return o.registerURL
 }
 
 func discountNote(discountCents int64) string {

@@ -108,21 +108,19 @@ func main() {
 	paymentSettings := auction.NewPaymentSettingsStore(db, enc)
 	pay := auction.NewDBPaymentProvider(paymentSettings)
 
-	// Notificador real. Sem WHATSAPP_API_URL o processo sobe em modo de
-	// log (útil em homologação), mas avisa alto: nada chega ao cliente.
-	var notifier auction.Notifier
-	if url := envOr("WHATSAPP_API_URL", ""); url != "" {
-		notifier = auction.NewHTTPNotifier(url, envOr("WHATSAPP_API_TOKEN", ""))
-	} else {
-		log.Println("AVISO: WHATSAPP_API_URL não definida — nenhuma mensagem será entregue de verdade")
-		notifier = logNotifier{}
-	}
+	// Configuração editável no painel (gateway do WhatsApp, segredos de
+	// webhook, link de cadastro). Enquanto ninguém salvar nada na tela, os
+	// valores continuam sendo herdados das variáveis de ambiente de
+	// sempre, então um deploy existente não quebra.
+	settings := auction.NewSettingsStore(db, enc)
+	notifier := auction.NewDBNotifier(settings).WithLogger(log.Printf)
 
 	orch := auction.NewOrchestrator(auction.NewStore(db), pay, notifier, auction.NewZoneShipping(db),
 		auction.OrchestratorOptions{
 			PaymentWindow: 15 * time.Minute,
 			ProviderName:  "db", // o provedor de fato é resolvido em tempo real pelo DBPaymentProvider
 			RegisterURL:   envOr("REGISTER_URL", "https://leiloes.digitalsac.io/cadastro/"),
+			Settings:      settings,
 			OnNotice:      logNotice,
 			Logf:          log.Printf,
 		})
@@ -137,6 +135,7 @@ func main() {
 
 	api := auction.NewAPIServer(db, eng, orch, mustEnv("ADMIN_TOKEN")).
 		WithPaymentSettings(paymentSettings).
+		WithSettings(settings).
 		WithWebhookAuth(auction.WebhookAuth{
 			HubPaySecret:     envOr("HUBPAY_WEBHOOK_SECRET", ""),
 			HubPaySigHeader:  envOr("HUBPAY_SIGNATURE_HEADER", ""),
@@ -167,8 +166,11 @@ func main() {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	if settings.Get(ctx, auction.SetWhatsAppAPIURL) == "" {
+		log.Println("AVISO: gateway de WhatsApp não configurado — nenhuma mensagem será entregue de verdade. Configure no painel, em Configurações.")
+	}
 	go func() {
-		log.Printf("ouvindo em %s — configure o gateway de pagamento em /api/settings/payment", srv.Addr)
+		log.Printf("ouvindo em %s — configure gateway e segredos no painel, em Configurações", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}
@@ -181,20 +183,6 @@ func main() {
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
-}
-
-// logNotifier só registra: usado quando o gateway de WhatsApp não está
-// configurado, para homologação.
-type logNotifier struct{}
-
-func (logNotifier) SendText(_ context.Context, jid, text string) error {
-	log.Printf("[whatsapp->%s] %s", jid, text)
-	return nil
-}
-
-func (logNotifier) SendCharge(_ context.Context, jid, caption string, charge auction.ChargeResult) error {
-	log.Printf("[whatsapp->%s] %s | pix=%s url=%s", jid, caption, charge.PixCode, charge.PayURL)
-	return nil
 }
 
 func logNotice(_ context.Context, n auction.Notice) {

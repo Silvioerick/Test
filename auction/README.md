@@ -130,18 +130,46 @@ Toda variável aceita também `<NOME>_FILE` apontando para um secret.
 | `REDIS_ADDR` | sim | Redis >= 7 |
 | `ADMIN_TOKEN` | sim | painel. **Sem ele o painel responde 503** |
 | `ENCRYPTION_KEY` | sim | chave mestra AES-256 (base64, 32 bytes) |
-| `HUBPAY_WEBHOOK_SECRET` | para usar HubPay | segredo HMAC do webhook |
-| `ASAAS_WEBHOOK_TOKEN` | para usar Asaas | `authToken` do webhook |
-| `WHATSAPP_WEBHOOK_SECRET` | para receber lances | segredo do webhook de entrada |
-| `WHATSAPP_API_URL` / `_TOKEN` | para enviar mensagens | gateway (DigiGO) |
-| `REGISTER_URL` | não | prefixo do link de cadastro |
+| `HUBPAY_WEBHOOK_SECRET` | não* | segredo HMAC do webhook |
+| `ASAAS_WEBHOOK_TOKEN` | não* | `authToken` do webhook |
+| `WHATSAPP_WEBHOOK_SECRET` | não* | segredo do webhook de entrada |
+| `WHATSAPP_API_URL` / `_TOKEN` | não* | gateway (DigiGO) |
+| `REGISTER_URL` | não* | prefixo do link de cadastro |
+
+\* Configure pelo painel, em Configurações — estas variáveis existem só
+como fallback para deploys anteriores.
 | `CORS_ORIGIN` | não | se hospedar o painel em outra origem |
 | `PANEL_DIR`, `LISTEN_ADDR` | não | padrões `panel` e `:8080` |
 
-A chave do gateway de pagamento **não** é variável de ambiente: fica
-cifrada (AES-256-GCM) no Postgres e é gerenciada pelo painel em
-`/api/settings/payment`. A `ENCRYPTION_KEY` é o único segredo que continua
-fora do banco — perdê-la significa recadastrar as chaves de pagamento.
+### Quase nada precisa de variável de ambiente
+
+Só quatro variáveis são obrigatórias: `DATABASE_URL`, `REDIS_ADDR`,
+`ENCRYPTION_KEY` e `ADMIN_TOKEN`. **Todo o resto se configura no painel**,
+em Configurações — o gateway do DigiGO (URL e token), os segredos dos
+webhooks de pagamento, o segredo do webhook de entrada e o prefixo do
+link de cadastro. Valores sensíveis vão cifrados (AES-256-GCM) para o
+Postgres; os demais ficam em claro, para dar para auditar no banco.
+
+A tela mostra, campo a campo, de onde o valor efetivo veio: **salvo no
+painel**, **herdado do ambiente** ou **não configurado**. O que estiver
+salvo no painel sempre ganha da variável de ambiente, e apagar o campo
+devolve o controle ao ambiente — então um deploy que já existia continua
+funcionando sem ninguém abrir o painel, e a migração pode ser feita campo
+a campo. Uma alteração vale na própria réplica na hora e nas demais em
+até 5s (cache curto, porque o webhook consulta isso a cada requisição).
+
+Quatro coisas não cabem no painel, de propósito:
+
+| | Por quê |
+|---|---|
+| `DATABASE_URL`, `REDIS_ADDR` | São necessários para chegar até a tabela de configuração. |
+| `ENCRYPTION_KEY` | É a chave que decifra os segredos da tela. Guardá-la ali não protegeria nada. |
+| `ADMIN_TOKEN` | É o que protege o painel. Se morasse nele, seria preciso autenticar para poder configurar a autenticação. |
+
+A chave do gateway de **pagamento** segue no seu próprio lugar
+(`/api/settings/payment`), também cifrada. A `ENCRYPTION_KEY` é o único
+segredo que continua fora do banco — perdê-la significa recadastrar
+chaves de pagamento e segredos de webhook.
 
 ## Segurança — leia antes de ir ao ar
 
@@ -158,14 +186,17 @@ fora do banco — perdê-la significa recadastrar as chaves de pagamento.
   HMAC-SHA256 do corpo cru em hex, no header `X-Hubpay-Signature`
   (configurável por `HUBPAY_SIGNATURE_HEADER`). Ajuste `VerifyHubPay` se a
   HubPay usar outro esquema.
-- **Fixe o Subresource Integrity do Vue no painel.** Hoje ele vem de um
-  CDN de terceiros sem hash. Gere com:
+- **O painel não depende de CDN.** O Vue é servido de
+  `panel/vendor/vue-3.4.21.prod.js` pelo próprio servidor, com
+  `integrity` fixado. Antes ele vinha do unpkg sem hash — o que, além do
+  risco de integridade, deixava o painel em branco em qualquer rede que
+  bloqueasse o CDN. Para atualizar a versão:
   ```bash
-  curl -s https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js \
-    | openssl dgst -sha384 -binary | openssl base64 -A
+  npm pack vue@3.4.21 && tar xzf vue-3.4.21.tgz
+  cp package/dist/vue.global.prod.js panel/vendor/vue-3.4.21.prod.js
+  echo "sha384-$(openssl dgst -sha384 -binary panel/vendor/vue-3.4.21.prod.js \
+    | openssl base64 -A)"   # atualize o integrity nos dois HTML
   ```
-  e acrescente `integrity="sha384-..." crossorigin="anonymous"`, ou baixe
-  o arquivo para `panel/vendor/`.
 - **O token de admin é um segredo compartilhado**, guardado em
   `sessionStorage` no navegador. Troque por login de verdade com cookie
   `httpOnly` quando o painel crescer.

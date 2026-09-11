@@ -23,8 +23,9 @@ type APIServer struct {
 	orch       *Orchestrator
 	payments   *PaymentSettingsStore // pode ser nil se o servidor não usar DBPaymentProvider
 	admin      string                // token fixo simples; troque pela auth real do painel.digitalsac.io
-	hooks      WebhookAuth           // segredos que provam que o webhook veio do provedor
-	waSecret   string                // segredo do webhook de entrada do WhatsApp
+	hooks      WebhookAuth           // fallback fixo; o painel tem precedência (ver authFor)
+	settings   *SettingsStore        // configuração editável no painel
+	waSecret   string                // fallback do segredo do webhook de entrada
 	waDefaults int                   // nº de calotes que bloqueia lances. 0 = não bloqueia
 	cors       string                // origem permitida no CORS. "" = sem CORS
 	loginIPs   *ipLimiter            // trava a varredura de números no pedido de código
@@ -74,6 +75,8 @@ func NewAPIServer(db *sql.DB, engine *Engine, orch *Orchestrator, adminToken str
 	m.HandleFunc("GET /api/settings/payment", s.listPaymentSettings)
 	m.HandleFunc("POST /api/settings/payment", s.upsertPaymentSetting)
 	m.HandleFunc("POST /api/settings/payment/activate", s.activatePaymentSetting)
+	m.HandleFunc("GET /api/settings/app", s.listAppSettings)
+	m.HandleFunc("POST /api/settings/app", s.setAppSetting)
 	s.mux = m
 	return s
 }
@@ -94,6 +97,45 @@ func (s *APIServer) WithPaymentSettings(ps *PaymentSettingsStore) *APIServer {
 func (s *APIServer) WithWebhookAuth(a WebhookAuth) *APIServer {
 	s.hooks = a
 	return s
+}
+
+// WithSettings liga a configuração gerenciada pelo painel. Com ela, os
+// segredos de webhook e o gateway do WhatsApp passam a vir do Postgres —
+// o que estiver salvo no painel ganha do que estiver em WithWebhookAuth
+// ou nas variáveis de ambiente.
+func (s *APIServer) WithSettings(st *SettingsStore) *APIServer {
+	s.settings = st
+	return s
+}
+
+// authFor resolve os segredos de webhook na hora da requisição: painel
+// primeiro, depois o que veio de WithWebhookAuth/env.
+func (s *APIServer) authFor(r *http.Request) WebhookAuth {
+	a := resolveFromSettings(r.Context(), s.settings)
+	if a.HubPaySecret == "" {
+		a.HubPaySecret = s.hooks.HubPaySecret
+	}
+	if a.HubPaySigHeader == "" {
+		a.HubPaySigHeader = s.hooks.HubPaySigHeader
+	}
+	if a.AsaasToken == "" {
+		a.AsaasToken = s.hooks.AsaasToken
+	}
+	if a.AsaasTokenHeader == "" {
+		a.AsaasTokenHeader = s.hooks.AsaasTokenHeader
+	}
+	return a
+}
+
+// whatsappSecret resolve o segredo do webhook de entrada: painel, senão
+// o que veio de WithWhatsApp/env.
+func (s *APIServer) whatsappSecret(r *http.Request) string {
+	if s.settings != nil {
+		if v := s.settings.Get(r.Context(), SetWhatsAppWebhookSecret); v != "" {
+			return v
+		}
+	}
+	return s.waSecret
 }
 
 // WithWhatsApp liga o webhook de entrada de mensagens. secret é conferido
@@ -597,7 +639,7 @@ func (s *APIServer) hubpayWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "corpo inválido")
 		return
 	}
-	if err := s.hooks.VerifyHubPay(r, body); err != nil {
+	if err := s.authFor(r).VerifyHubPay(r, body); err != nil {
 		s.rejectWebhook(w, "hubpay", err)
 		return
 	}
@@ -651,7 +693,7 @@ func (s *APIServer) finishPaymentWebhook(w http.ResponseWriter, r *http.Request,
 // validar assinatura em produção — não hardcodei porque não confirmei esse
 // detalhe na documentação consultada.
 func (s *APIServer) asaasWebhook(w http.ResponseWriter, r *http.Request) {
-	if err := s.hooks.VerifyAsaas(r); err != nil {
+	if err := s.authFor(r).VerifyAsaas(r); err != nil {
 		s.rejectWebhook(w, "asaas", err)
 		return
 	}
@@ -943,13 +985,14 @@ func (s *APIServer) activatePaymentSetting(w http.ResponseWriter, r *http.Reques
 // posta aqui consegue dar lance no lugar de terceiros.
 
 func (s *APIServer) whatsappWebhook(w http.ResponseWriter, r *http.Request) {
-	if s.waSecret == "" {
+	secret := s.whatsappSecret(r)
+	if secret == "" {
 		s.logf("auction api: webhook do whatsapp recusado: segredo não configurado")
 		writeErr(w, http.StatusServiceUnavailable, "webhook sem segredo configurado")
 		return
 	}
 	got := r.Header.Get("X-Webhook-Token")
-	if subtle.ConstantTimeCompare([]byte(got), []byte(s.waSecret)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
 		writeErr(w, http.StatusUnauthorized, "não autorizado")
 		return
 	}
@@ -995,6 +1038,54 @@ func (s *APIServer) customerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.RevokeSession(r.Context(), token); err != nil {
 		s.fail(w, "encerrar sessão", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// --- Configuração geral (painel admin) --------------------------------------
+//
+// Tudo que o admin consegue digitar na tela mora aqui, cifrado quando for
+// segredo — em vez de variável de ambiente. Enquanto ninguém salvar nada,
+// o valor continua sendo herdado do env, e a tela mostra de onde ele veio.
+
+func (s *APIServer) listAppSettings(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		writeErr(w, http.StatusNotImplemented, "este servidor não usa configuração pelo banco")
+		return
+	}
+	list, err := s.settings.List(r.Context())
+	if err != nil {
+		s.fail(w, "listar configuração", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *APIServer) setAppSetting(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		writeErr(w, http.StatusNotImplemented, "este servidor não usa configuração pelo banco")
+		return
+	}
+	var in struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "json inválido")
+		return
+	}
+	if in.Key == "" {
+		writeErr(w, http.StatusBadRequest, "key é obrigatória")
+		return
+	}
+	if err := s.settings.Set(r.Context(), in.Key, in.Value); err != nil {
+		// Chave desconhecida é erro de quem chamou, não do servidor.
+		if strings.HasPrefix(err.Error(), "auction: chave de configuração desconhecida") {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.fail(w, "gravar configuração", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

@@ -4,9 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Área do Cliente — DigitalSac Leilões</title>
-<!-- SEGURANÇA: fixe o Subresource Integrity antes de produção — veja a
-     nota equivalente em index.html. -->
-<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<!-- Vue servido pelo próprio servidor, não por CDN de terceiros: o
+     painel precisa abrir em rede restrita e sem depender de um host
+     externo estar no ar. O integrity fecha o caso mesmo servindo local. -->
+<script src="vendor/vue-3.4.21.prod.js"
+        integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X"
+        crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;

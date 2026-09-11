@@ -44,6 +44,70 @@ func NewHTTPNotifier(endpoint, token string) *HTTPNotifier {
 	}
 }
 
+// DBNotifier resolve a configuração do gateway no Postgres a cada envio,
+// do mesmo jeito que o DBPaymentProvider faz com a chave de pagamento:
+// trocar a URL ou o token do DigiGO no painel vale na próxima mensagem,
+// sem redeploy e sem mexer em variável de ambiente.
+//
+// Enquanto ninguém tiver salvo nada no painel, o SettingsStore ainda
+// herda de WHATSAPP_API_URL / WHATSAPP_API_TOKEN, então um deploy que já
+// existia continua funcionando.
+type DBNotifier struct {
+	settings *SettingsStore
+	client   *http.Client
+	logf     func(string, ...any)
+}
+
+func NewDBNotifier(settings *SettingsStore) *DBNotifier {
+	return &DBNotifier{
+		settings: settings,
+		client:   &http.Client{Timeout: 15 * time.Second},
+		logf:     func(string, ...any) {},
+	}
+}
+
+// WithLogger registra os envios quando o gateway ainda não foi
+// configurado, para homologação não ficar silenciosa.
+func (n *DBNotifier) WithLogger(logf func(string, ...any)) *DBNotifier {
+	if logf != nil {
+		n.logf = logf
+	}
+	return n
+}
+
+func (n *DBNotifier) resolve(ctx context.Context) (*HTTPNotifier, error) {
+	url := n.settings.Get(ctx, SetWhatsAppAPIURL)
+	if url == "" {
+		return nil, errNoNotifierConfigured
+	}
+	return &HTTPNotifier{
+		Endpoint:   url,
+		Token:      n.settings.Get(ctx, SetWhatsAppAPIToken),
+		ToField:    n.settings.GetDefault(ctx, SetWhatsAppToField, "to"),
+		TextField:  n.settings.GetDefault(ctx, SetWhatsAppTextField, "text"),
+		HTTPClient: n.client,
+		Logf:       n.logf,
+	}, nil
+}
+
+func (n *DBNotifier) SendText(ctx context.Context, jid, text string) error {
+	h, err := n.resolve(ctx)
+	if err != nil {
+		n.logf("[whatsapp nao enviado ->%s] %s", jid, text)
+		return err
+	}
+	return h.SendText(ctx, jid, text)
+}
+
+func (n *DBNotifier) SendCharge(ctx context.Context, jid, caption string, charge ChargeResult) error {
+	h, err := n.resolve(ctx)
+	if err != nil {
+		n.logf("[whatsapp nao enviado ->%s] %s | pix=%s url=%s", jid, caption, charge.PixCode, charge.PayURL)
+		return err
+	}
+	return h.SendCharge(ctx, jid, caption, charge)
+}
+
 func (n *HTTPNotifier) post(ctx context.Context, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {

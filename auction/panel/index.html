@@ -10,7 +10,12 @@
        curl -s https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js \
          | openssl dgst -sha384 -binary | openssl base64 -A
      e acrescente integrity="sha384-<hash>" crossorigin="anonymous". -->
-<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<!-- Vue servido pelo próprio servidor, não por CDN de terceiros: o
+     painel precisa abrir em rede restrita e sem depender de um host
+     externo estar no ar. O integrity fecha o caso mesmo servindo local. -->
+<script src="vendor/vue-3.4.21.prod.js"
+        integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X"
+        crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;
@@ -228,6 +233,38 @@ const App = {
     }
     function closeLotDetail() { lotDetail.value = null; }
 
+    // ---- Configurações gerais (DigiGO, segredos de webhook, link) -------
+    const appSettings = ref([]);
+    const settingsAvailable = ref(true);
+    const settingDraft = reactive({});   // key -> valor digitado
+    const savingSetting = ref("");
+
+    async function loadAppSettings() {
+      try {
+        appSettings.value = await api("/api/settings/app");
+        settingsAvailable.value = true;
+        for (const s of appSettings.value) settingDraft[s.key] = "";
+      } catch (e) {
+        if (String(e.message).includes("501")) { settingsAvailable.value = false; return; }
+        flash("Erro ao carregar configurações: " + e.message, "err");
+      }
+    }
+
+    async function saveSetting(key) {
+      const value = (settingDraft[key] || "").trim();
+      savingSetting.value = key;
+      try {
+        await api("/api/settings/app", { method: "POST", body: JSON.stringify({ key, value }) });
+        settingDraft[key] = "";
+        await loadAppSettings();
+        flash(value ? "Configuração salva." : "Configuração apagada — volta a usar a variável de ambiente, se houver.", "ok");
+      } catch (e) {
+        flash("Erro ao salvar: " + e.message, "err");
+      } finally { savingSetting.value = ""; }
+    }
+
+    const SOURCE_LABEL = { painel: "salvo no painel", env: "herdado do ambiente", vazio: "não configurado" };
+
     let refreshTimer = null;
     function startAutoRefresh() {
       clearInterval(refreshTimer);
@@ -237,7 +274,7 @@ const App = {
     }
 
     onMounted(async () => {
-      await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]);
+      await Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings(), loadAppSettings()]);
       startAutoRefresh();
     });
 
@@ -247,6 +284,7 @@ const App = {
       lotForm, openableProducts, createLot,
       summary, lots, statusFilter, lotDetail, openLot, closeLotDetail,
       paymentSettings, paymentAvailable, newPayment, savePaymentSetting, activateProvider,
+      appSettings, settingsAvailable, settingDraft, savingSetting, saveSetting, SOURCE_LABEL,
       money, fmtDate, STATUS_LABEL,
       reloadAll: () => Promise.all([loadProducts(), loadSummary(), loadLots(), loadPaymentSettings()]),
     };
@@ -274,6 +312,7 @@ const App = {
       <div :class="['tab', tab==='cadastro' && 'active']" @click="tab='cadastro'">Cadastro</div>
       <div :class="['tab', tab==='relatorio' && 'active']" @click="tab='relatorio'">Relatório</div>
       <div :class="['tab', tab==='pagamento' && 'active']" @click="tab='pagamento'">Pagamento</div>
+      <div :class="['tab', tab==='config' && 'active']" @click="tab='config'">Configurações</div>
     </div>
 
     <div v-if="tab==='cadastro'">
@@ -380,6 +419,60 @@ const App = {
         </table>
         <div v-else class="empty">Nenhum leilão com esse filtro.</div>
       </div>
+    </div>
+
+    <div v-if="tab==='config'">
+      <div class="card" v-if="!settingsAvailable">
+        <div class="msg err" style="margin:0">
+          Este servidor não usa configuração pelo banco (rodando sem <code>WithSettings</code> / <code>ENCRYPTION_KEY</code>).
+        </div>
+      </div>
+      <template v-else>
+        <div class="card">
+          <h2>Integrações</h2>
+          <div class="sub" style="margin-bottom:16px">
+            O que estiver aqui vale mais que a variável de ambiente e passa a valer na próxima mensagem — sem redeploy.
+            Segredos ficam cifrados no banco (AES-256) e nunca voltam em texto puro: você só vê os últimos caracteres.
+            Deixe em branco e salve para apagar e voltar a usar a variável de ambiente, se houver.
+          </div>
+
+          <div v-for="s in appSettings" :key="s.key"
+               style="padding:14px 0; border-bottom:1px solid var(--border)">
+            <label style="margin-bottom:6px">
+              {{ s.label }}
+              <span class="badge" :class="s.source==='painel' ? 'b-paid' : (s.source==='env' ? 'b-in_auction' : 'b-unsold')"
+                    style="margin-left:8px">{{ SOURCE_LABEL[s.source] }}</span>
+            </label>
+            <div class="sub" style="font-size:12px; margin-bottom:8px">{{ s.help }}</div>
+
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+              <input v-model="settingDraft[s.key]"
+                     :type="s.secret ? 'password' : 'text'"
+                     :placeholder="s.secret
+                        ? (s.masked ? 'Atual: ' + s.masked + ' — digite para substituir' : 'Não configurado')
+                        : (s.value || 'Não configurado')"
+                     style="flex:1; min-width:240px">
+              <button class="secondary" :disabled="savingSetting===s.key" @click="saveSetting(s.key)">
+                {{ savingSetting===s.key ? 'Salvando…' : 'Salvar' }}
+              </button>
+            </div>
+
+            <div class="sub" style="font-size:11px; margin-top:6px" v-if="s.env_var">
+              Variável equivalente: <code>{{ s.env_var }}</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>O que continua fora do painel</h2>
+          <div class="sub">
+            Três coisas não cabem aqui, de propósito:
+            <code>DATABASE_URL</code> e <code>REDIS_ADDR</code> são necessários para chegar até esta tabela;
+            <code>ENCRYPTION_KEY</code> é a chave que decifra os segredos desta tela, então guardá-la aqui não protegeria nada;
+            e <code>ADMIN_TOKEN</code> é o que protege este painel — se morasse nele, seria preciso autenticar para poder configurar a autenticação.
+          </div>
+        </div>
+      </template>
     </div>
 
     <div v-if="tab==='pagamento'">

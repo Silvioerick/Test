@@ -1,6 +1,7 @@
 package auction
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -104,4 +105,21 @@ func (a WebhookAuth) VerifyAsaas(r *http.Request) error {
 		}
 	}
 	return ErrWebhookSignature
+}
+
+// resolveFromSettings monta o WebhookAuth a partir da configuração do
+// painel (com fallback para as variáveis de ambiente antigas). É chamado
+// a cada webhook, o que permite trocar o segredo na tela sem redeploy —
+// o SettingsStore tem cache curto, então isso não vira consulta ao banco
+// por requisição.
+func resolveFromSettings(ctx context.Context, s *SettingsStore) WebhookAuth {
+	if s == nil {
+		return WebhookAuth{}
+	}
+	return WebhookAuth{
+		HubPaySecret:     s.Get(ctx, SetHubPayWebhookSecret),
+		HubPaySigHeader:  s.Get(ctx, SetHubPaySigHeader),
+		AsaasToken:       s.Get(ctx, SetAsaasWebhookToken),
+		AsaasTokenHeader: s.Get(ctx, SetAsaasTokenHeader),
+	}
 }

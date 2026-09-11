@@ -19,11 +19,12 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
-    # Só 127.0.0.1: a aplicação fala com o banco pela rede do compose.
-    # Publicar em 0.0.0.0 numa VPS deixa o Postgres exposto à internet.
-    # Para acessar de fora, use um túnel SSH:
-    #   ssh -L 5432:127.0.0.1:5432 usuario@sua-vps
-    ports: ['127.0.0.1:5432:5432']
+    # SEM porta publicada de propósito: a API fala com o banco pela rede
+    # interna do compose. Publicar no host não serve para nada aqui e
+    # ainda conflita com um Postgres que já exista na máquina.
+    # Para rodar `go test` no host, use o docker-compose.dev.yml.
+    # Para inspecionar o banco de fora:
+    #   docker compose exec postgres psql -U postgres auction
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres']
@@ -34,8 +35,7 @@ services:
   redis:
     image: redis:7-alpine
     command: ['redis-server', '--port', '6399', '--save', '']
-    # Mesma regra do Postgres: nunca em 0.0.0.0 numa VPS.
-    ports: ['127.0.0.1:6399:6399']
+    # Mesma coisa: sem porta publicada. Ver docker-compose.dev.yml.
     restart: unless-stopped
     healthcheck:
       test: ['CMD', 'redis-cli', '-p', '6399', 'ping']

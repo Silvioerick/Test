@@ -33,8 +33,22 @@ Os dados ficam no volume `pgdata`; `docker compose down` preserva,
 Para desenvolver (dependências no Docker, Go na máquina):
 
 ```bash
-docker compose up -d postgres redis
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  up -d postgres redis
 go test ./...     # o schema é aplicado sozinho (TestMain -> Migrate)
+```
+
+O `docker-compose.dev.yml` existe só para publicar as portas do Postgres
+e do Redis no host — o compose principal **não publica nenhuma das duas**,
+porque a API fala com elas pela rede interna e publicar só conflita com um
+Postgres ou Redis que já exista na máquina. Se a 5432 ou a 6399 já
+estiverem ocupadas, escolha outras no `.env` (`POSTGRES_BIND`,
+`REDIS_BIND`).
+
+Para espiar o banco de um servidor, sem publicar porta:
+
+```bash
+docker compose exec postgres psql -U postgres auction
 ```
 
 O compose cria dois bancos: `auction` (aplicação) e `auction_test`
@@ -178,12 +192,12 @@ Duas ressalvas:
 
 #### O que fica fechado para a internet
 
-Postgres (5432), Redis (6399) e a própria API (4000) escutam **só em
-`127.0.0.1`**. Público mesmo, só o proxy nas portas 80 e 443. Para
-acessar o banco da sua máquina, use um túnel:
+Postgres e Redis **não são publicados no host** — existem só dentro da
+rede do compose. A API escuta em `127.0.0.1:4000`; público mesmo, só o
+proxy nas portas 80 e 443. Para mexer no banco:
 
 ```bash
-ssh -L 5432:127.0.0.1:5432 usuario@sua-vps
+docker compose exec postgres psql -U postgres auction
 ```
 
 #### Operação do dia a dia

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Complete seu cadastro — Leilão</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1e222b; --border:#2a2f3a;
+    --text:#e7e9ee; --muted:#9aa3b2; --accent:#4f8cff;
+    --ok:#34c77b; --danger:#f2555a;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    padding:16px; line-height:1.5;
+  }
+  main { max-width:520px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .won { text-align:center; padding:20px; }
+  .won .item { font-size:17px; font-weight:600; margin-bottom:4px; }
+  .won .amount { font-size:30px; font-weight:700; color:var(--ok); }
+  .won .label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 5px; }
+  label .req { color:var(--danger); }
+  input, select {
+    width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:13px 12px; font-size:16px; /* 16px evita zoom no iOS */
+  }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
+  input[aria-invalid="true"] { border-color:var(--danger); }
+  .row { display:flex; gap:10px; }
+  .row > * { flex:1; }
+  .row .narrow { flex:0 0 110px; }
+  button {
+    width:100%; background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:15px; font-size:16px; font-weight:600; cursor:pointer; margin-top:22px;
+  }
+  button:disabled { opacity:.55; cursor:default; }
+  .msg { padding:12px 14px; border-radius:8px; font-size:14px; margin-bottom:16px; }
+  .msg.err { background:#f2555a22; color:#f78a8d; border:1px solid #f2555a44; }
+  .msg.ok { background:#34c77b22; color:#5fe0a0; border:1px solid #34c77b44; }
+  .center { text-align:center; padding:40px 20px; }
+  .center .big { font-size:44px; margin-bottom:12px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  .skeleton { color:var(--muted); text-align:center; padding:40px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div id="loading" class="skeleton">Carregando…</div>
+
+  <!-- Link inválido, expirado ou já usado -->
+  <div id="invalid" class="card center" hidden>
+    <div class="big">⌛</div>
+    <h1>Link indisponível</h1>
+    <p class="sub" id="invalid-msg" style="margin-bottom:0">
+      Este link de cadastro expirou, já foi usado ou não é válido.
+      Se você acha que é engano, responda no WhatsApp que a gente verifica.
+    </p>
+  </div>
+
+  <!-- Cadastro concluído -->
+  <div id="done" class="card center" hidden>
+    <div class="big">✅</div>
+    <h1>Cadastro concluído!</h1>
+    <p class="sub" style="margin-bottom:0">
+      Já estamos calculando o frete e gerando sua cobrança.
+      Ela chega no seu WhatsApp em instantes — fique de olho no prazo de pagamento.
+    </p>
+  </div>
+
+  <!-- Formulário -->
+  <div id="form-wrap" hidden>
+    <div class="card won">
+      <div class="label">Você arrematou</div>
+      <div class="item" id="product">—</div>
+      <div class="amount" id="amount">—</div>
+    </div>
+
+    <div class="card">
+      <h1>Complete seu cadastro</h1>
+      <p class="sub">
+        Precisamos do seu endereço para calcular o frete e do seu documento
+        para emitir a cobrança. Leva menos de um minuto.
+      </p>
+
+      <div id="error" class="msg err" hidden></div>
+
+      <form id="form" novalidate>
+        <label for="name">Nome completo <span class="req">*</span></label>
+        <input id="name" name="name" autocomplete="name" required>
+
+        <label for="document">CPF ou CNPJ <span class="req">*</span></label>
+        <input id="document" name="document" inputmode="numeric" autocomplete="off" required>
+        <div class="hint">Só números — a formatação é automática.</div>
+
+        <label for="email">E-mail</label>
+        <input id="email" name="email" type="email" autocomplete="email">
+
+        <label for="cep">CEP <span class="req">*</span></label>
+        <input id="cep" name="cep" inputmode="numeric" autocomplete="postal-code" required>
+        <div class="hint" id="cep-hint">Preenchemos o endereço automaticamente.</div>
+
+        <label for="street">Rua <span class="req">*</span></label>
+        <input id="street" name="street" autocomplete="address-line1" required>
+
+        <div class="row">
+          <div class="narrow">
+            <label for="number">Número <span class="req">*</span></label>
+            <input id="number" name="number" inputmode="numeric" required>
+          </div>
+          <div>
+            <label for="complement">Complemento</label>
+            <input id="complement" name="complement" placeholder="apto, bloco…">
+          </div>
+        </div>
+
+        <label for="neighborhood">Bairro</label>
+        <input id="neighborhood" name="neighborhood" autocomplete="address-level3">
+
+        <div class="row">
+          <div>
+            <label for="city">Cidade <span class="req">*</span></label>
+            <input id="city" name="city" autocomplete="address-level2" required>
+          </div>
+          <div class="narrow">
+            <label for="state">UF <span class="req">*</span></label>
+            <select id="state" name="state" required>
+              <option value="">—</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="submit" id="submit">Concluir cadastro</button>
+      </form>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // O token vem no fim da URL: /cadastro/<token>
+  var parts = location.pathname.split("/").filter(Boolean);
+  var token = parts[parts.length - 1] || "";
+  if (token === "cadastro") token = "";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var UFS = "AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split(" ");
+  UFS.forEach(function (uf) {
+    var o = document.createElement("option");
+    o.value = o.textContent = uf;
+    $("state").appendChild(o);
+  });
+
+  function show(id) {
+    ["loading", "invalid", "done", "form-wrap"].forEach(function (k) {
+      $(k).hidden = (k !== id);
+    });
+  }
+
+  function money(cents) {
+    return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  }
+
+  function digits(s) { return (s || "").replace(/\D/g, ""); }
+
+  // --- máscaras -------------------------------------------------------
+  $("document").addEventListener("input", function () {
+    var d = digits(this.value).slice(0, 14);
+    this.value = d.length <= 11
+      ? d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2")
+      : d.replace(/(\d{2})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1/$2").replace(/(\d{4})(\d{1,2})$/, "$1-$2");
+  });
+
+  $("cep").addEventListener("input", function () {
+    var d = digits(this.value).slice(0, 8);
+    this.value = d.replace(/(\d{5})(\d)/, "$1-$2");
+    if (d.length === 8) lookupCEP(d);
+  });
+
+  // Preenchimento automático pelo CEP. É um plus: se a consulta falhar
+  // (offline, serviço fora), a pessoa digita à mão e o envio funciona
+  // igual — nada aqui bloqueia o formulário.
+  function lookupCEP(cep) {
+    $("cep-hint").textContent = "Buscando endereço…";
+    fetch("https://viacep.com.br/ws/" + cep + "/json/")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.erro) { $("cep-hint").textContent = "CEP não encontrado — preencha à mão."; return; }
+        if (d.logradouro) $("street").value = d.logradouro;
+        if (d.bairro) $("neighborhood").value = d.bairro;
+        if (d.localidade) $("city").value = d.localidade;
+        if (d.uf) $("state").value = d.uf;
+        $("cep-hint").textContent = "Endereço preenchido — confira e complete o número.";
+        $("number").focus();
+      })
+      .catch(function () {
+        $("cep-hint").textContent = "Não consegui buscar o CEP — preencha à mão.";
+      });
+  }
+
+  // --- carrega o contexto do token ------------------------------------
+  if (!token) { show("invalid"); return; }
+
+  fetch("/api/public/registration?token=" + encodeURIComponent(token))
+    .then(function (r) {
+      if (r.status === 410) { show("invalid"); return null; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(function (d) {
+      if (!d) return;
+      $("product").textContent = d.product_name || "seu lote";
+      $("amount").textContent = money(d.bid_amount_cents || 0);
+      show("form-wrap");
+    })
+    .catch(function () {
+      $("invalid-msg").textContent =
+        "Não consegui carregar seus dados agora. Verifique a conexão e tente abrir o link de novo.";
+      show("invalid");
+    });
+
+  // --- envio ----------------------------------------------------------
+  $("form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    $("error").hidden = true;
+
+    var body = {
+      name: $("name").value.trim(),
+      document: digits($("document").value),
+      email: $("email").value.trim(),
+      cep: digits($("cep").value),
+      street: $("street").value.trim(),
+      number: $("number").value.trim(),
+      complement: $("complement").value.trim(),
+      neighborhood: $("neighborhood").value.trim(),
+      city: $("city").value.trim(),
+      state: $("state").value
+    };
+
+    var missing = ["name", "document", "cep", "street", "number", "city", "state"]
+      .filter(function (k) { return !body[k]; });
+    ["name", "document", "cep", "street", "number", "city", "state"].forEach(function (k) {
+      $(k).setAttribute("aria-invalid", body[k] ? "false" : "true");
+    });
+    if (missing.length) {
+      $("error").textContent = "Preencha os campos obrigatórios que ficaram marcados.";
+      $("error").hidden = false;
+      $(missing[0]).focus();
+      return;
+    }
+    if (body.document.length !== 11 && body.document.length !== 14) {
+      $("document").setAttribute("aria-invalid", "true");
+      $("error").textContent = "CPF deve ter 11 dígitos e CNPJ 14.";
+      $("error").hidden = false;
+      $("document").focus();
+      return;
+    }
+
+    $("submit").disabled = true;
+    $("submit").textContent = "Enviando…";
+
+    fetch("/api/public/registration/" + encodeURIComponent(token), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) {
+        if (r.ok) { show("done"); return; }
+        if (r.status === 410) { show("invalid"); return; }
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          throw new Error(d.error || ("HTTP " + r.status));
+        });
+      })
+      .catch(function (e) {
+        $("error").textContent = "Não consegui enviar: " + e.message + " — tente de novo.";
+        $("error").hidden = false;
+      })
+      .finally(function () {
+        $("submit").disabled = false;
+        $("submit").textContent = "Concluir cadastro";
+      });
+  });
+})();
+</script>
+</body>
+</html>

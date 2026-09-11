@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -826,5 +827,94 @@ func TestRegression_TokenDeSessaoNaoFicaEmClaroNoBanco(t *testing.T) {
 	got, err := st.GetSession(ctx, token)
 	if err != nil || got != info.ID {
 		t.Fatalf("sessão válida não foi reconhecida: %v %d", err, got)
+	}
+}
+
+// --- 19. O link de cadastro não queima por erro do cliente -------------
+
+// CEP fora da área de entrega não pode consumir o token: a pessoa precisa
+// poder corrigir e reenviar. Antes, o token era consumido antes do
+// cálculo de frete e a segunda tentativa dava "link expirado".
+func TestRegression_CEPNaoAtendidoNaoQueimaOLink(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	// Sem nenhuma zona cadastrada, qualquer CEP é "não atendido".
+	o := NewOrchestrator(st, newMockPay(), &mockNotify{}, NewZoneShipping(db),
+		OrchestratorOptions{PaymentWindow: time.Hour, ProviderName: "mock", Logf: t.Logf})
+
+	prod := mkProduct(t, db, "Item")
+	if err := st.CreateLot(ctx, "lot-cep", prod, Config{StartPrice: 1000, MinIncrement: 100}, time.Hour, ""); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := st.GetOrCreateParticipant(ctx, "a@s.whatsapp.net", "")
+	// Lance vencedor, como o fechamento gravaria.
+	if err := st.SetWinningAmount(ctx, "lot-cep", 6100); err != nil {
+		t.Fatal(err)
+	}
+	token, err := st.OpenRegistration(ctx, "lot-cep", info.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = o.CompleteRegistration(ctx, token, sampleForm("99999-999"))
+	if !errors.Is(err, ErrNoShippingZone) {
+		t.Fatalf("esperava ErrNoShippingZone, veio %v", err)
+	}
+	// O token continua válido — é isso que importa.
+	if _, err := st.GetRegistrationContext(ctx, token); err != nil {
+		t.Fatalf("o link foi queimado por um erro que é do cliente corrigir: %v", err)
+	}
+
+	// Com uma zona que cobre o CEP, o mesmo link funciona.
+	if _, err := db.Exec(`INSERT INTO shipping_zones (name, cep_prefix, price_cents) VALUES ('SP','01',2500)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.CompleteRegistration(ctx, token, sampleForm("01310-100")); err != nil {
+		t.Fatalf("segunda tentativa com CEP válido deveria passar: %v", err)
+	}
+	var total int64
+	db.QueryRow(`SELECT amount FROM payment_orders WHERE lot_id='lot-cep'`).Scan(&total)
+	if total != 6100+2500 {
+		t.Fatalf("total errado: %d", total)
+	}
+}
+
+// Provedor fora do ar depois do cadastro salvo NÃO é erro do cliente: ele
+// vê sucesso, e a cobrança entra na fila de retry.
+func TestRegression_CobrancaPendenteNaoViraErroPraoCliente(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	st := NewStore(db)
+	pay := newMockPay()
+	pay.fail = true
+	o := newTestOrchestrator(t, db, pay, &mockNotify{}, &noticeLog{})
+	api := NewAPIServer(db, New(setup(t), Options{}), o, "admin")
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+
+	prod := mkProduct(t, db, "Item")
+	st.CreateLot(ctx, "lot-pend", prod, Config{StartPrice: 1000, MinIncrement: 100}, time.Hour, "")
+	info, _ := st.GetOrCreateParticipant(ctx, "a@s.whatsapp.net", "")
+	token, err := st.OpenRegistration(ctx, "lot-pend", info.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status, out := doJSON(t, srv, "POST", "/api/public/registration/"+token, "", map[string]string{
+		"Name": "Fulano de Tal", "Document": "12345678900", "CEP": "01310-100",
+		"Street": "Rua X", "Number": "10", "City": "São Paulo", "State": "SP",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("cliente deveria ver sucesso, veio %d %v", status, out)
+	}
+	if out["charge_pending"] != true {
+		t.Fatalf("resposta deveria sinalizar cobrança pendente: %v", out)
+	}
+	// E o pedido existe, pendente, para o retry pegar.
+	var n int
+	db.QueryRow(`SELECT count(*) FROM payment_orders WHERE lot_id='lot-pend' AND status='pending' AND charge_id IS NULL`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("pedido não ficou pendente para retry: %d", n)
 	}
 }

@@ -22,7 +22,7 @@ sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
 docker compose --profile app up --build
 ```
 
-Pronto: painel em <http://localhost:8080/>, API em `/api/`. O servidor
+Pronto: painel em <http://localhost:4000/>, API em `/api/`. O servidor
 aplica as migrations sozinho na subida. Cole o `ADMIN_TOKEN` do `.env` no
 campo "Token de admin" do painel e cadastre a chave do gateway em
 Configurações — ela vai cifrada para o Postgres, não para o `.env`.
@@ -40,6 +40,95 @@ go test ./...     # o schema é aplicado sozinho (TestMain -> Migrate)
 O compose cria dois bancos: `auction` (aplicação) e `auction_test`
 (suíte, que dá `TRUNCATE` nas tabelas e por isso não pode encostar no
 primeiro). Redis fica na 6399 para não colidir com uma instância local.
+
+### Deploy numa VPS
+
+O que muda em relação ao local: os webhooks da Asaas, HubPay e DigiGO
+chegam da internet, e o link de cadastro é aberto no celular do cliente.
+Isso exige domínio e HTTPS — não é opcional, o token de admin viaja num
+header e em HTTP puro qualquer um no caminho o lê.
+
+**1. Aponte um domínio para a VPS** (registro A/AAAA) e abra as portas 80
+e 443. No Ubuntu com `ufw`:
+
+```bash
+sudo ufw allow 80,443/tcp && sudo ufw enable
+```
+
+**2. Instale o Docker**, se ainda não tiver:
+
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+**3. Configure e suba:**
+
+```bash
+cd auction
+cp .env.example .env
+sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
+sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" .env
+sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" .env
+nano .env      # preencha AUCTION_DOMAIN e ACME_EMAIL
+
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml \
+  --profile app up -d --build
+```
+
+O Caddy emite o certificado sozinho em alguns segundos. Acompanhe com
+`docker compose logs -f caddy`.
+
+**4. Pegue o token de admin e abra o painel:**
+
+```bash
+grep ADMIN_TOKEN .env
+```
+
+Painel em `https://SEU_DOMINIO/`. Cole o token no campo do topo e vá em
+**Configurações** para preencher o DigiGO e os segredos de webhook — nada
+disso precisa de redeploy.
+
+**5. Aponte os webhooks** nos painéis dos provedores:
+
+| Provedor | URL |
+|---|---|
+| DigiGO (mensagens recebidas) | `https://SEU_DOMINIO/api/webhooks/whatsapp` |
+| Asaas | `https://SEU_DOMINIO/api/webhooks/asaas` |
+| HubPay | `https://SEU_DOMINIO/api/webhooks/hubpay` |
+
+O do DigiGO precisa mandar o header `X-Webhook-Token` com o segredo que
+você salvou em Configurações. Enquanto o segredo não estiver salvo, o
+endpoint responde **503 e não aceita nada** — é proposital.
+
+Ajuste também `REGISTER_URL` em Configurações para
+`https://SEU_DOMINIO/cadastro/`, senão o link mandado ao vencedor aponta
+para o lugar errado.
+
+**Já usa nginx ou Traefik?** Ignore o `docker-compose.proxy.yml`, suba só
+com `--profile app` e aponte o seu proxy para `127.0.0.1:4000`.
+
+#### O que fica fechado para a internet
+
+Postgres (5432), Redis (6399) e a própria API (4000) escutam **só em
+`127.0.0.1`**. Público mesmo, só o proxy nas portas 80 e 443. Para
+acessar o banco da sua máquina, use um túnel:
+
+```bash
+ssh -L 5432:127.0.0.1:5432 usuario@sua-vps
+```
+
+#### Operação do dia a dia
+
+```bash
+docker compose logs -f api          # acompanhar
+docker compose --profile app up -d --build   # atualizar depois de git pull
+docker compose down                 # parar (os dados ficam no volume pgdata)
+docker exec -t $(docker compose ps -q postgres) \
+  pg_dump -U postgres auction | gzip > backup-$(date +%F).sql.gz   # backup
+```
+
+`docker compose down -v` apaga o volume e **perde o banco** — não use por
+engano.
 
 ### Por que estas versões
 
@@ -139,7 +228,7 @@ Toda variável aceita também `<NOME>_FILE` apontando para um secret.
 \* Configure pelo painel, em Configurações — estas variáveis existem só
 como fallback para deploys anteriores.
 | `CORS_ORIGIN` | não | se hospedar o painel em outra origem |
-| `PANEL_DIR`, `LISTEN_ADDR` | não | padrões `panel` e `:8080` |
+| `PANEL_DIR`, `LISTEN_ADDR` | não | padrões `panel` e `:4000` |
 
 ### Quase nada precisa de variável de ambiente
 

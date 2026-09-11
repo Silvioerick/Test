@@ -16,7 +16,7 @@
 //	REGISTER_URL          prefixo do link de cadastro
 //	PANEL_DIR             pasta do painel estático (padrão ./panel)
 //	CORS_ORIGIN           origem liberada, se o painel for hospedado à parte
-//	LISTEN_ADDR           padrão :8080
+//	LISTEN_ADDR           padrão :4000
 //
 // A chave do gateway de pagamento fica CIFRADA no Postgres e é gerenciada
 // pelo painel em /api/settings/payment. O único segredo que continua fora
@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -152,6 +153,19 @@ func main() {
 	mux.Handle("/api/", api)
 	panelDir := envOr("PANEL_DIR", "panel")
 	if _, err := os.Stat(panelDir); err == nil {
+		// O link mandado ao vencedor é <REGISTER_URL><token>, ou seja
+		// /cadastro/<token>. Um FileServer procuraria um arquivo com o
+		// nome do token e devolveria 404 — a mesma página atende
+		// qualquer token, que o JavaScript lê da URL.
+		registerPage := filepath.Join(panelDir, "cadastro.html")
+		if _, err := os.Stat(registerPage); err == nil {
+			mux.HandleFunc("/cadastro/", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				http.ServeFile(w, r, registerPage)
+			})
+		} else {
+			log.Printf("AVISO: %s não encontrado — o link de cadastro do vencedor vai dar 404", registerPage)
+		}
 		mux.Handle("/", http.FileServer(http.Dir(panelDir)))
 		log.Printf("painel servido de %s", panelDir)
 	} else {
@@ -159,7 +173,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:              envOr("LISTEN_ADDR", ":8080"),
+		Addr:              envOr("LISTEN_ADDR", ":4000"),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

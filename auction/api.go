@@ -620,15 +620,24 @@ func (s *APIServer) postRegistration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "nome, documento e endereço completo são obrigatórios")
 		return
 	}
-	if err := s.orch.CompleteRegistration(r.Context(), token, form); err != nil {
-		if errors.Is(err, ErrTokenInvalid) {
-			writeErr(w, http.StatusGone, "link inválido, expirado ou já usado")
-			return
-		}
+	err := s.orch.CompleteRegistration(r.Context(), token, form)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case errors.Is(err, ErrTokenInvalid):
+		writeErr(w, http.StatusGone, "link inválido, expirado ou já usado")
+	case errors.Is(err, ErrNoShippingZone):
+		// O link continua válido: a pessoa corrige o CEP e reenvia.
+		writeErr(w, http.StatusBadRequest,
+			"ainda não entregamos nesse CEP. Confira o número ou fale com a gente no WhatsApp.")
+	case errors.Is(err, ErrChargePending):
+		// Cadastro salvo; a cobrança falhou por nossa conta e vai para o
+		// retry. Para o cliente isso é sucesso — ele não tem o que fazer.
+		s.logf("auction api: cadastro salvo com cobrança pendente de retry: %v", err)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "charge_pending": true})
+	default:
 		s.fail(w, r.URL.Path, err)
-		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- Webhooks de pagamento ---------------------------------------------------

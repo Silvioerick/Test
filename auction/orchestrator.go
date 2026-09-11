@@ -444,16 +444,43 @@ func discountNote(discountCents int64) string {
 	return fmt.Sprintf(" - desconto %s por já ter ganhado outro item hoje", formatCents(discountCents))
 }
 
+// ErrChargePending: o cadastro foi gravado com sucesso, mas a cobrança
+// não pôde ser gerada agora (provedor fora do ar). O pedido fica pendente
+// e o RetryFailedCharges resolve — o cliente NÃO deve ver isso como
+// falha, porque não há nada que ele possa fazer e os dados dele já estão
+// salvos.
+var ErrChargePending = errors.New("auction: cadastro salvo, cobrança será gerada em instantes")
+
 // CompleteRegistration é chamado pelo handler HTTP público quando a pessoa
-// termina de preencher o formulário de endereço. Segue direto para o
-// cálculo de frete e a cobrança.
+// termina de preencher o formulário de endereço.
+//
+// A ordem aqui importa. O token é de uso único, então tudo que pode
+// falhar POR CULPA DO QUE A PESSOA DIGITOU acontece antes de consumi-lo —
+// senão um CEP fora da área de entrega queimaria o link e a pessoa
+// ficaria sem como corrigir, vendo "link expirado" na segunda tentativa.
+//
+// Depois de consumido, o que falha é problema nosso (provedor de cobrança
+// fora do ar), e aí o cadastro vale e a cobrança entra na fila de retry.
 func (o *Orchestrator) CompleteRegistration(ctx context.Context, token string, form CustomerForm) error {
+	// 1. Token válido? Sem consumir.
+	if _, err := o.store.GetRegistrationContext(ctx, token); err != nil {
+		return err
+	}
+	// 2. O CEP é atendido? Falhar aqui deixa o link intacto.
+	if _, err := o.shipping.Quote(ctx, form.CEP); err != nil {
+		return fmt.Errorf("calcular frete: %w", err)
+	}
+	// 3. Agora sim: consome o token e grava o cadastro.
 	rc, err := o.store.CompleteRegistration(ctx, token, form)
 	if err != nil {
 		return err
 	}
 	customer := Customer{Name: form.Name, Document: form.Document, Email: form.Email, Phone: rc.JID}
-	return o.chargeWinner(ctx, rc.LotID, rc.ParticipantID, rc.JID, customer, form.CEP, rc.BidAmount)
+	if err := o.chargeWinner(ctx, rc.LotID, rc.ParticipantID, rc.JID, customer, form.CEP, rc.BidAmount); err != nil {
+		o.logf("auction: cadastro do lote %s salvo mas a cobrança falhou (vai para retry): %v", rc.LotID, err)
+		return fmt.Errorf("%w: %v", ErrChargePending, err)
+	}
+	return nil
 }
 
 // --- pagamento ----------------------------------------------------------

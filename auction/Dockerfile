@@ -11,5 +11,5 @@ WORKDIR /app
 COPY --from=build /out/server /app/server
 COPY panel /app/panel
 USER app
-EXPOSE 8080
+EXPOSE 4000
 ENTRYPOINT ["/app/server"]

@@ -152,11 +152,23 @@ Key pages:
 - [Architecture](https://wacrm.tech/docs/architecture)
 - [Troubleshooting](https://wacrm.tech/docs/troubleshooting)
 
+## Repository layout
+
+- **`src/`** — the Next.js CRM app (see Stack below).
+- **`mcp-server/`** — MCP server for the CRM.
+- **`auction/`** — standalone Go service for flash auctions run over
+  WhatsApp: 1–3 minute lots with soft close, bids arriving as WhatsApp
+  messages, shipping quotes, payment charges and a small admin panel. It
+  has its own dependencies, tests and CI job; nothing in the Next.js app
+  imports it. See [`auction/README.md`](./auction/README.md).
+
 ## Stack
 
 - **App** — Next.js 16 (App Router), React 19, TypeScript, Tailwind v4.
 - **Data** — Supabase (Postgres + Auth + Storage + RLS).
 - **WhatsApp** — Meta Cloud API (official WhatsApp Business API).
+- **Auction service** — Go 1.24, Redis 7 (bid clock), Postgres
+  (durable record). Independent of the app's Supabase stack.
 
 ## Contributing
 

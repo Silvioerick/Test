@@ -1,0 +1,21 @@
+# Publica as portas do Postgres e do Redis no host, para rodar `go test`
+# na sua máquina contra os contêineres:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     up -d postgres redis
+#   go test ./...
+#
+# O compose principal NÃO publica essas portas: a API fala com os dois
+# pela rede interna, e publicar no host só serve para conflitar com um
+# Postgres ou Redis que já exista na máquina.
+#
+# Já tem algo na 5432 ou na 6399? Escolha outras no .env:
+#   POSTGRES_BIND=127.0.0.1:55432
+#   REDIS_BIND=127.0.0.1:16399
+# Aí aponte os testes para elas (testDSN em orchestrator_test.go e o
+# endereço em auction_test.go), ou rode os testes dentro do contêiner.
+services:
+  postgres:
+    ports: ['${POSTGRES_BIND:-127.0.0.1:5432}:5432']
+  redis:
+    ports: ['${REDIS_BIND:-127.0.0.1:6399}:6399']

@@ -1,0 +1,35 @@
+# HTTPS automático (Let's Encrypt) na frente da API — para deploy em VPS.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml \
+#     --profile app up -d --build
+#
+# Exige no .env:
+#   AUCTION_DOMAIN=leiloes.seudominio.com.br   (DNS A/AAAA apontando pra VPS)
+#   ACME_EMAIL=voce@seudominio.com.br          (avisos de expiração)
+#
+# E as portas 80 e 443 abertas no firewall — o Let's Encrypt precisa da 80
+# para validar o domínio.
+#
+# Fica num arquivo à parte de propósito: como AUCTION_DOMAIN é
+# obrigatório, deixá-lo no compose principal faria até
+# `docker compose up postgres redis` falhar em quem só quer desenvolver.
+#
+# Já usa nginx ou Traefik? Ignore este arquivo e aponte o seu para
+# 127.0.0.1:4000.
+services:
+  caddy:
+    image: caddy:2-alpine
+    depends_on: [api]
+    environment:
+      AUCTION_DOMAIN: "${AUCTION_DOMAIN:?defina AUCTION_DOMAIN no .env, ex. leiloes.seudominio.com.br}"
+      ACME_EMAIL: "${ACME_EMAIL:-}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports: ['80:80', '443:443']
+    restart: unless-stopped
+
+volumes:
+  caddydata:
+  caddyconfig:

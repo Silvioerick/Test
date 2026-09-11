@@ -1,0 +1,99 @@
+# Ambiente de desenvolvimento, teste e execução local.
+#
+#   cp .env.example .env    # e gere os segredos (ver comentários no arquivo)
+#   docker compose up -d postgres redis     # só as dependências, para `go test`
+#   docker compose --profile app up --build # a stack inteira
+#
+# Postgres: o banco da aplicação é `auction`; o de teste (`auction_test`)
+# é criado ao lado pelo initdb, porque a suíte dá TRUNCATE nas tabelas.
+# Redis roda na 6399 para não colidir com uma instância local na 6379.
+services:
+  postgres:
+    # O schema não usa nada acima de PG 12; 18 é o padrão, 16 é o piso
+    # que a CI também exercita. Troque com POSTGRES_VERSION no .env.
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: auction
+      # PGDATA explícito, dentro do volume montado abaixo.
+      #
+      # A imagem do Postgres 18 mudou o PGDATA padrão (passou a ser
+      # /var/lib/postgresql/<versão>/docker, e o VOLUME virou
+      # /var/lib/postgresql). Quem montava um volume em
+      # /var/lib/postgresql/data — como esta configuração fazia — para de
+      # persistir os dados ali e o contêiner pode nem subir.
+      #
+      # Fixar o PGDATA aqui torna o caminho o mesmo em 16 e em 18, que
+      # são as duas versões que a CI exercita.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    # SEM porta publicada de propósito: a API fala com o banco pela rede
+    # interna do compose. Publicar no host não serve para nada aqui e
+    # ainda conflita com um Postgres que já exista na máquina.
+    # Para rodar `go test` no host, use o docker-compose.dev.yml.
+    # Para inspecionar o banco de fora:
+    #   docker compose exec postgres psql -U postgres auction
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--port', '6399', '--save', '']
+    # Mesma coisa: sem porta publicada. Ver docker-compose.dev.yml.
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6399', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    profiles: ['app']
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/auction?sslmode=disable
+      REDIS_ADDR: redis:6399
+      # Obrigatórios — o processo recusa subir sem eles.
+      # Primeiro operador do painel (só no 1º start). Sem ADMIN_PASSWORD a
+      # senha inicial é sorteada e sai no log — veja com:
+      #   docker compose logs api | head -20
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Opcional: token para script/automação. Pessoas usam login.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?defina ENCRYPTION_KEY no .env (openssl rand -base64 32)}
+      # Opcionais — cada webhook sem segredo responde 503 e não aceita nada.
+      HUBPAY_WEBHOOK_SECRET: ${HUBPAY_WEBHOOK_SECRET:-}
+      ASAAS_WEBHOOK_TOKEN: ${ASAAS_WEBHOOK_TOKEN:-}
+      ASAAS_TOKEN_HEADER: ${ASAAS_TOKEN_HEADER:-}
+      WHATSAPP_WEBHOOK_SECRET: ${WHATSAPP_WEBHOOK_SECRET:-}
+      WHATSAPP_API_URL: ${WHATSAPP_API_URL:-}
+      WHATSAPP_API_TOKEN: ${WHATSAPP_API_TOKEN:-}
+      REGISTER_URL: ${REGISTER_URL:-}
+    # Padrão 127.0.0.1: quem fala com a internet é o proxy (perfil
+    # `proxy`, abaixo), que termina o TLS. O token de admin viaja num
+    # header — em HTTP puro ele é lido por qualquer um no caminho.
+    # Para expor direto mesmo assim: API_BIND=0.0.0.0:4000 no .env.
+    ports: ['${API_BIND:-127.0.0.1:4000}:4000']
+    restart: unless-stopped
+    healthcheck:
+      # /api/products sem sessão responde 401 quando o servidor está de
+      # pé — o que já prova que ele responde.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null -S http://127.0.0.1:4000/api/products 2>&1 | grep -qE "HTTP/1.1 (401|503)"']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  pgdata:

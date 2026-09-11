@@ -1,0 +1,31 @@
+# Túnel Cloudflare — para quando a máquina NÃO tem IP público.
+#
+# É o caso de VPS em rede interna, atrás de NAT ou sem porta 80/443
+# alcançável de fora. O túnel cria uma saída da máquina para a Cloudflare,
+# que passa a entregar as requisições vindas da internet — sem abrir
+# porta nenhuma no firewall e já com HTTPS válido.
+#
+# Isso não é conforto: SEM alcance público de fora, o sistema não
+# funciona. Os lances chegam por webhook do DigiGO e as confirmações de
+# pagamento por webhook da Asaas/HubPay. Se esses POSTs não chegarem,
+# ninguém dá lance e ninguém consegue pagar.
+#
+# Como usar:
+#   1. Em https://one.dash.cloudflare.com -> Networks -> Tunnels,
+#      crie um túnel e copie o token.
+#   2. No .env:  CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
+#   3. No painel do túnel, aponte o hostname público para  http://api:4000
+#   4. Suba:
+#        docker compose -f docker-compose.yml -f docker-compose.tunnel.yml \
+#          --profile app up -d --build
+#
+# Depois, em Configurações do painel, use o hostname do túnel nas URLs de
+# webhook e no REGISTER_URL.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    depends_on: [api]
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?defina CLOUDFLARE_TUNNEL_TOKEN no .env (painel Zero Trust da Cloudflare)}"
+    restart: unless-stopped
